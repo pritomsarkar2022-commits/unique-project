@@ -12,7 +12,7 @@ import { appUrl, linkSeal } from '../support.mjs';
  * @param {object} store   JobStore-shaped: sign(record, url) -> string
  * @param {object} record  a stored job record
  * @param {string} url     the file host address to reach
- * @param {{download?: boolean, name?: string, isPlaylist?: boolean, segment?: boolean, host?: string, https?: boolean}} opts
+ * @param {{download?: boolean, name?: string, isPlaylist?: boolean, host?: string, https?: boolean}} opts
  */
 export function relayLink(store, record, url, opts = {}) {
   const download = opts.download === true;
@@ -28,12 +28,6 @@ export function relayLink(store, record, url, opts = {}) {
   }
   if (isPlaylist) {
     params.set('p', '1');
-  }
-  // A media segment has to come back through this server: hls.js fetches it with
-  // xhr, and a cross-origin reply it cannot read is a broken preview. Playlists and
-  // segments are therefore never redirected to the file host.
-  if (opts.segment === true) {
-    params.set('seg', '1');
   }
   return appUrl(params.toString(), opts.host ?? '', opts.https !== false);
 }

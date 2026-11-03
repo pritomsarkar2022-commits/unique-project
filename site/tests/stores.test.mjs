@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { openKv, atomicPutGuardAvailable, selectDriver } from '../src/storage/kv.mjs';
+import { openKv, atomicPutGuardAvailable, selectDriver, __testing } from '../src/storage/kv.mjs';
 import { JobStore } from '../src/job/jobStore.mjs';
 import { BuildStore } from '../src/build/buildStore.mjs';
 import { Throttle, bucketDecision, validateIp, bucketKey } from '../src/net/throttle.mjs';
@@ -172,6 +172,165 @@ test('a blobs environment without the package still gets a working store', async
   assert.equal(selectDriver({ VD_STORE: 'blobs' }), 'blobs');
   assert.equal(atomicPutGuardAvailable({ NETLIFY: '1' }), true);
   assert.equal(atomicPutGuardAvailable({}), false);
+});
+
+/* ------------------------------------------------------------------ blobs driver */
+
+/**
+ * A stand-in for the real BlobStore, with the surface @netlify/blobs 11 actually
+ * has: get/getWithMetadata/getMetadata/set/list/delete, set() taking {metadata,
+ * onlyIfNew} and answering a lost race with {modified:false}. getRange is
+ * deliberately absent, because the sdk does not have it at any version, and
+ * conditional is off for the pre-10 shape, where set() took only {metadata} and
+ * returned undefined, overwriting whatever it was pointed at.
+ */
+function fakeBlobsStore({ conditional = true } = {}) {
+  const data = new Map();
+  const stats = { getCalls: 0, headCalls: 0, listCalls: 0 };
+  let seq = 0;
+  const asArrayBuffer = (buf) => buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+  return {
+    stats,
+    data,
+    async get(key, options) {
+      stats.getCalls++;
+      const hit = data.get(key);
+      if (!hit) {
+        return null;
+      }
+      return options && options.type === 'arrayBuffer' ? asArrayBuffer(hit.buf) : Buffer.from(hit.buf).toString('utf8');
+    },
+    async getWithMetadata(key, options) {
+      const hit = data.get(key);
+      if (!hit) {
+        return null;
+      }
+      const payload = options && options.type === 'arrayBuffer' ? asArrayBuffer(hit.buf) : Buffer.from(hit.buf).toString('utf8');
+      return { data: payload, metadata: hit.meta, etag: hit.etag };
+    },
+    async getMetadata(key) {
+      stats.headCalls++;
+      const hit = data.get(key);
+      return hit ? { etag: hit.etag, metadata: hit.meta } : null;
+    },
+    async set(key, value, options = {}) {
+      if (conditional && options.onlyIfNew && data.has(key)) {
+        return { modified: false };
+      }
+      const etag = 'etag' + (++seq);
+      data.set(key, {
+        buf: value instanceof Uint8Array ? Buffer.from(value) : Buffer.from(String(value), 'latin1'),
+        meta: options.metadata ?? null,
+        etag,
+      });
+      return conditional ? { etag, modified: true } : undefined;
+    },
+    async list(options = {}) {
+      stats.listCalls++;
+      const prefix = (options && options.prefix) || '';
+      return {
+        blobs: [...data.keys()].filter((k) => k.startsWith(prefix)).map((key) => ({ key, etag: data.get(key).etag })),
+        directories: [],
+      };
+    },
+    async delete(key) {
+      data.delete(key);
+    },
+  };
+}
+
+function blobsKv(store) {
+  return __testing.makeBlobsKv('files', {}, async () => ({ getStore: () => store }));
+}
+
+const everyByte = () => {
+  const body = Buffer.alloc(512);
+  for (let i = 0; i < body.length; i++) {
+    body[i] = i % 256;
+  }
+  return body;
+};
+
+test('blobs: bytes round trip through the driver unchanged', async () => {
+  const store = fakeBlobsStore();
+  const kv = await blobsKv(store);
+  assert.equal(kv.driver, 'blobs');
+  const body = everyByte();
+  await kv.put('v.mp4', body);
+  assert.deepEqual(await kv.get('v.mp4'), body, '0x00 to 0xff survive the round trip');
+  await kv.put('s.txt', Buffer.from('café', 'latin1'));
+  assert.equal((await kv.get('s.txt')).toString('latin1'), 'café');
+  assert.equal(await kv.get('gone'), null);
+});
+
+test('blobs: metadata round trips without the write stamp, and createdAt is real', async () => {
+  const store = fakeBlobsStore();
+  const kv = await blobsKv(store);
+  await kv.put('b.json', '{"start":1}', { touched: 1234 });
+  const withMeta = await kv.getWithMeta('b.json');
+  assert.equal(withMeta.data.toString('latin1'), '{"start":1}');
+  assert.deepEqual(withMeta.meta, { touched: 1234 }, 'the driver keeps its own clock out of the caller meta');
+  assert.ok(Math.abs(withMeta.createdAt - Math.floor(Date.now() / 1000)) < 60,
+    'createdAt is the write time: a zero there ages every entry to 1970 and the gc deletes it');
+  await kv.put('b.json', '{"start":2}');
+  assert.equal((await kv.getWithMeta('b.json')).meta, null, 'a put without meta clears the stored meta');
+  assert.equal(await kv.getWithMeta('nope.json'), null);
+});
+
+test('blobs: getRange answers exactly what the filesystem driver answers', async (t) => {
+  const store = fakeBlobsStore();
+  const kv = await blobsKv(store);
+  const fsKv = await kvFor(t, 'files-blobs-parity');
+  const body = everyByte();
+  await kv.put('v.mp4', body);
+  await fsKv.put('v.mp4', body);
+  for (const [start, end] of [[0, 99], [400, 499], [502, 5000], [900, null], [0, null], [4000, 5000]]) {
+    const mine = await kv.getRange('v.mp4', start, end);
+    const theirs = await fsKv.getRange('v.mp4', start, end);
+    assert.deepEqual(mine.data, theirs.data, JSON.stringify([start, end]));
+    assert.equal(mine.total, theirs.total, JSON.stringify([start, end]));
+  }
+  assert.equal(await kv.getRange('gone.mp4', 0, 10), null, 'absent key is null, not an empty range');
+});
+
+test('blobs: the lock is exclusive with conditional writes', async () => {
+  const store = fakeBlobsStore();
+  const kv = await blobsKv(store);
+  assert.equal(await kv.putIfNotExists('lock.json', 'token-one', { taken: 100 }), true);
+  assert.equal(await kv.putIfNotExists('lock.json', 'token-two', { taken: 200 }), false,
+    'the second taker is told no, the way flock would');
+  assert.equal((await kv.get('lock.json')).toString('latin1'), 'token-one', 'and the held value is not overwritten');
+  assert.deepEqual((await kv.getWithMeta('lock.json')).meta, { taken: 100 });
+});
+
+test('blobs: the lock is still exclusive on an sdk that ignores onlyIfNew', async () => {
+  const store = fakeBlobsStore({ conditional: false });
+  const kv = await blobsKv(store);
+  assert.equal(await kv.putIfNotExists('lock.json', 'token-one', { taken: 100 }), true);
+  assert.equal(await kv.putIfNotExists('lock.json', 'token-two', { taken: 200 }), false,
+    'the read in front of the put is what holds the line on @netlify/blobs 8');
+  assert.equal((await kv.get('lock.json')).toString('latin1'), 'token-one');
+});
+
+test('blobs: list reads heads, not bodies, and reports meta and age', async () => {
+  const store = fakeBlobsStore();
+  const kv = await blobsKv(store);
+  await kv.put('22.json', 'b', { touched: 2 });
+  await kv.put('11.json', 'a', { touched: 1 });
+  await kv.put('33.mp4', everyByte());
+  store.stats.getCalls = 0;
+  store.stats.headCalls = 0;
+  const listed = await kv.list('');
+  assert.deepEqual(listed.map((e) => e.key), ['11.json', '22.json', '33.mp4']);
+  assert.equal(listed[0].meta.touched, 1);
+  assert.equal(listed[2].meta, null, 'only the write stamp: nothing the caller stored');
+  assert.ok(listed[2].createdAt > 0, 'a finished mp4 has a real age, or the sweep deletes it on the first tick');
+  assert.equal(store.stats.getCalls, 0, 'a sweep over the files namespace must not download a single byte of video');
+  assert.equal(store.stats.headCalls, 3);
+  assert.deepEqual((await kv.list('1')).map((e) => e.key), ['11.json']);
+  assert.deepEqual((await kv.list('zz')).map((e) => e.key), []);
+  await kv.del('11.json');
+  assert.deepEqual((await kv.list('')).map((e) => e.key), ['22.json', '33.mp4']);
 });
 
 /* ------------------------------------------------------------------ JobStore */

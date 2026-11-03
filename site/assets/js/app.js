@@ -382,7 +382,7 @@
     host.innerHTML =
       (isStream
         ? '<button class="btn btn-filled btn-lg" type="button" id="build-btn"><svg class="ic"><use href="#ic-merge"/></svg> Save as one MP4</button>'
-        : '<a class="btn btn-filled btn-lg" href="' + esc(s.downloadUrl) + '" download><svg class="ic"><use href="#ic-download"/></svg> Download ' + esc(fmt) + '</a>') +
+        : '<a class="btn btn-filled btn-lg" id="dl-link" href="' + esc(s.downloadUrl) + '" download><svg class="ic"><use href="#ic-download"/></svg> Download ' + esc(fmt) + '</a>') +
       '<button class="btn btn-tonal" type="button" id="copy-btn"><svg class="ic"><use href="#ic-link"/></svg> Copy link</button>' +
       (isStream
         ? '<button class="btn btn-outlined" type="button" id="raw-btn"><svg class="ic"><use href="#ic-system_update_alt"/></svg> Save stream file</button>'
@@ -397,14 +397,19 @@
         });
       });
     }
+    var dl = $('#dl-link');
+    if (dl) {
+      dl.addEventListener('click', function (ev) {
+        // The link is left in place for a browser without script, but a file this host
+        // cannot carry in one answer has to arrive in pieces, so the click is taken over.
+        ev.preventDefault();
+        saveInPieces(s.downloadUrl, nameFromLink(s.downloadUrl) || 'video.' + (extLabel(s) || 'bin'));
+      });
+    }
     var raw = $('#raw-btn');
     if (raw) {
       raw.addEventListener('click', function () {
-        var a = document.createElement('a');
-        a.href = s.downloadUrl;
-        a.download = 'stream.ts';
-        document.body.appendChild(a); a.click(); a.remove();
-        snack('The stream file is saving. Use Save as one MP4 for a normal video.');
+        saveInPieces(s.downloadUrl, 'stream.ts', 'The stream file is saving. Use Save as one MP4 for a normal video.');
       });
     }
     var build = $('#build-btn');
@@ -431,6 +436,135 @@
     return ok;
   }
   function promptText(text) { window.prompt('Copy this link:', text); }
+
+  /* ---------- saving a file this host hands over in pieces ---------- */
+  // One answer from this host carries about 18 MB and a video is often more, so a save
+  // first asks for a single byte to learn the size. A file that still fits one answer is
+  // handed to the browser's own download, exactly as the php site streamed it; only a
+  // larger one is assembled here from ranged pieces, which are the same bytes, in the
+  // same order, as that one stream. The probe is a byte, so it answers fast enough that
+  // the click that started the save is still a fresh gesture for a download or a file.
+  var PIECE = 8388608;            // 8 MB, comfortably inside one answer
+  var ONE_ANSWER = 15728640;      // 15 MB: under the ceiling, so one request is enough
+  var IN_PAGE_LIMIT = 268435456;  // 256 MB: past this the page asks for a file to write into
+
+  function nameFromLink(link) {
+    var m = /[?&]name=([^&]+)/.exec(String(link || ''));
+    return m ? decodeURIComponent(m[1].replace(/\+/g, ' ')) : '';
+  }
+
+  function totalOf(contentRange) {
+    var m = /\/(\d+)\s*$/.exec(String(contentRange || ''));
+    return m ? Number(m[1]) : null;
+  }
+
+  function saveWhole(url, name) {
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
+
+  function saveInPieces(url, name, note) {
+    var start = 0;
+    var total = null;
+    var pieces = [];
+    var sink = null;
+    var dismiss = null;
+    var beat = null;
+
+    function ask(range) {
+      return fetch(url, { headers: { Range: range }, credentials: 'same-origin' }).then(function (r) {
+        if (r.status !== 200 && r.status !== 206) {
+          return Promise.reject(new Error('The download stopped at ' + fmtBytes(start) + '. Run the save again to pick it up from there.'));
+        }
+        return r.arrayBuffer().then(function (buf) {
+          return { ranged: r.status === 206, buf: buf, whole: totalOf(r.headers.get('Content-Range')) };
+        });
+      });
+    }
+
+    function pickSink() {
+      if (total <= IN_PAGE_LIMIT || !window.showSaveFilePicker) { return Promise.resolve(); }
+      // Holding several hundred megabytes in the page would end the tab, so a browser
+      // that lets a page write a file is asked for one; the rest keep the pieces.
+      return window.showSaveFilePicker({ suggestedName: name }).then(function (handle) {
+        return handle.createWritable().then(function (w) { sink = w; });
+      }, function (err) {
+        if (err && err.name === 'AbortError') { return Promise.reject(new Error('Save cancelled.')); }
+        return null;
+      });
+    }
+
+    function say() {
+      dismiss = snack(note || 'Saving ' + fmtBytes(total) + ' straight to your browser, '
+        + fmtBytes(PIECE) + ' at a time.');
+      beat = setInterval(function () {
+        snack('Still saving ' + fmtBytes(start) + ' of ' + fmtBytes(total) + '.');
+      }, 4500);
+    }
+
+    function quiet() {
+      if (beat) { clearInterval(beat); beat = null; }
+      if (dismiss) { dismiss(); dismiss = null; }
+    }
+
+    function finish() {
+      quiet();
+      if (sink) {
+        return sink.close().then(function () { snack('Saved ' + fmtBytes(total) + ' to ' + name + '.'); });
+      }
+      var href = URL.createObjectURL(new Blob(pieces, { type: 'application/octet-stream' }));
+      var a = document.createElement('a');
+      a.href = href;
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(function () { URL.revokeObjectURL(href); }, 60000);
+      snack('Saved ' + fmtBytes(total) + ' to your downloads.');
+      return null;
+    }
+
+    function step() {
+      return ask('bytes=' + start + '-' + Math.min(start + PIECE - 1, total - 1)).then(function (answer) {
+        if (answer.buf.byteLength === 0) { return Promise.reject(new Error('The download stopped at ' + fmtBytes(start) + '.')); }
+        start += answer.buf.byteLength;
+        if (sink) { return sink.write(answer.buf); }
+        pieces.push(answer.buf);
+        return null;
+      }).then(function () {
+        if (start >= total) { return finish(); }
+        return step();
+      });
+    }
+
+    function begin() {
+      return ask('bytes=0-0').then(function (answer) {
+        if (!answer.ranged) {
+          // The host answered the whole file, so the save is already done.
+          pieces = [answer.buf];
+          total = answer.buf.byteLength;
+          start = total;
+          if (total === 0) { return Promise.reject(new Error('The download arrived empty.')); }
+          return finish();
+        }
+        if (answer.whole === null) { return Promise.reject(new Error('The download has no known size.')); }
+        total = answer.whole;
+        if (total === 0) { return Promise.reject(new Error('The download arrived empty.')); }
+        if (total <= ONE_ANSWER) { saveWhole(url, name); return null; }
+        return pickSink().then(function () { say(); return step(); });
+      });
+    }
+
+    return begin()['catch'](function (err) {
+      quiet();
+      if (sink && sink.abort) { sink.abort().catch(function () { }); }
+      snack(err && err.message ? err.message : 'The download failed. Try the save again.');
+    });
+  }
 
   /* ---------- HLS to MP4 build ---------- */
   function buildMp4(s, btn) {
@@ -470,10 +604,8 @@
               btn.disabled = false;
               btn.innerHTML = '<svg class="ic"><use href="#ic-download"/></svg> Download MP4';
               btn.onclick = null;
-              var a = document.createElement('a');
-              a.href = p.fileUrl; a.download = p.filename || 'video.mp4';
-              document.body.appendChild(a); a.click(); a.remove();
-              snack('Your MP4 is ready.', 'Save again', function () { var x = document.createElement('a'); x.href = p.fileUrl; x.download = p.filename || 'video.mp4'; document.body.appendChild(x); x.click(); x.remove(); });
+              saveInPieces(p.fileUrl, p.filename || 'video.mp4', 'Your MP4 is saving.');
+              snack('Your MP4 is ready.', 'Save again', function () { saveInPieces(p.fileUrl, p.filename || 'video.mp4'); });
             } else { setTimeout(step, 1200); }
           }).catch(function () { stop = true; btn.disabled = false; btn.textContent = 'Save as one MP4'; });
       }

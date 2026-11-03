@@ -138,6 +138,16 @@ foreach ($probes as $probe) {
             case 'filter_url':
                 $res = filter_var($args[0], FILTER_VALIDATE_URL) !== false;
                 break;
+            // UrlGuard.php:59 asks php whether an address leaves the machine:
+            //   filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE) === false
+            case 'private_ip':
+                $ip = (string) $args[0];
+                $res = [
+                    'valid' => filter_var($ip, FILTER_VALIDATE_IP) !== false,
+                    'blocked' => filter_var($ip, FILTER_VALIDATE_IP,
+                        FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE) === false,
+                ];
+                break;
             case 'base64_decode':
                 $res = b64((string) base64_decode($args[0]));
                 break;
