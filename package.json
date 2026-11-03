@@ -1,0 +1,18 @@
+{
+  "name": "grably-video-link-tool",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Paste a video link, get the file. Netlify port of the Grably php analyser.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "node scripts/generate-static.mjs",
+    "test": "node --test --test-timeout=30000 site/tests/*.test.mjs",
+    "parity": "node parity/test-support.mjs && node parity/test-engine.mjs && node parity/test-unpack.mjs && node parity/test-media.mjs && node parity/test-stores.mjs"
+  },
+  "dependencies": {
+    "@netlify/blobs": "^8.1.0"
+  }
+}

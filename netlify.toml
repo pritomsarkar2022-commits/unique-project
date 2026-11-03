@@ -1,0 +1,74 @@
+# Netlify configuration for the Grably video link tool.
+#
+# The php original ran on shared apache hosting; this is the same app on netlify's
+# static + functions platform. The static bundle is generated from the markup the
+# php actually renders, and every dynamic route the front controller answered is
+# proxied to one function so the browser keeps asking the same urls it always did.
+
+[build]
+  command = "node scripts/generate-static.mjs"
+  publish = "site/public"
+  functions = "netlify/functions"
+
+[build.environment]
+  NODE_VERSION = "22"
+
+[functions]
+  node_bundler = "esbuild"
+  # Provided by the runtime, and useless to bundle.
+  external_node_modules = ["@netlify/blobs"]
+
+# app.js posts to "index.php?r=analyze" exactly as it always did, so that url keeps
+# existing as a proxy onto the router instead of becoming a different endpoint.
+[[redirects]]
+  from = "/index.php"
+  to = "/.netlify/functions/router"
+  status = 200
+
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/router"
+  status = 200
+
+[[redirects]]
+  from = "/health"
+  to = "/.netlify/functions/router"
+  status = 200
+
+[[redirects]]
+  from = "/relay"
+  to = "/.netlify/functions/router"
+  status = 200
+
+[[redirects]]
+  from = "/sitemap.xml"
+  to = "/.netlify/functions/router"
+  status = 200
+
+# The apache front controller took every path that was not a real file, so the home
+# page answers them here too. Non-force keeps real static files in front of it.
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+  force = false
+
+# The four headers index.php put on every response.
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    X-Frame-Options = "SAMEORIGIN"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    Permissions-Policy = "geolocation=(), microphone=(), camera=()"
+
+# mod_expires gave css/js/svg 30 days and html none.
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+    Cache-Control = "public, max-age=2592000"
+
+[[headers]]
+  for = "/index.html"
+  [headers.values]
+    Cache-Control = "public, max-age=0, must-revalidate"
