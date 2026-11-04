@@ -2382,18 +2382,27 @@
     out.set(bytes);
     return out;
   }
-  async function bytesOf2(url, signal) {
-    const res = await fetch(url, { signal, redirect: "follow", credentials: "omit" });
-    if (!res.ok) {
-      throw new Error("The video host answered HTTP " + res.status + ".");
+  async function fetchPart(url, signal, attempts = 4) {
+    let last = null;
+    for (let tryNo = 0; tryNo < attempts; tryNo += 1) {
+      const res = await fetch(url, { signal, redirect: "follow", credentials: "omit" });
+      if (res.ok) {
+        return res;
+      }
+      last = res;
+      if (signal.aborted) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500 * (tryNo + 1)));
     }
+    throw new Error("The video host answered HTTP " + last.status + ".");
+  }
+  async function bytesOf2(url, signal) {
+    const res = await fetchPart(url, signal);
     return plain(new Uint8Array(await res.arrayBuffer()));
   }
   async function textOf(url, signal) {
-    const res = await fetch(url, { signal, redirect: "follow", credentials: "omit" });
-    if (!res.ok) {
-      throw new Error("The video host answered HTTP " + res.status + ".");
-    }
+    const res = await fetchPart(url, signal);
     return await res.text();
   }
   self.onmessage = async (event) => {

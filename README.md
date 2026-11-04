@@ -49,6 +49,19 @@ end-to-end: a 61,878,609-byte file from `archive.org` came through the relay in 
 and hashed `46f62396c755e1ed0ab856a1521378d54196e125ef1a1643a199af087a15046b` — the same
 sha256 as the bytes pulled straight from the file host.
 
+**The platform also runs only one of these functions at a time, and it does not say so
+politely.** Measured on the live deploy: 18 parts of one stream asked for one at a time
+answer 18 × 200; asked for three at a time, 15 of 18 answer `404` with Netlify's *own*
+"This site is hosted on Netlify" page — the request never reached `handle()`. So a save
+that overlaps with the tab's own preview, a second tab, or a second visitor is told the
+video is missing when it is only queued. Nothing in this repo can raise that ceiling, so
+the two browser-side savers wait it out: `fetchPart()` in `site/src/engine/muxWorker.mjs`
+re-asks a refused part up to four times with a 0.5/1/1.5 s backoff, `ask()` in
+`site/assets/js/app.js` does the same for a ranged piece, and `quietPlayer()` pauses the
+preview before a save starts so the page stops competing with itself. The engine itself
+was already sequential — one part, then the next — which is why this is a retry and not a
+concurrency limit in the code.
+
 **`Save as MP4` runs on the visitor's device, not in the function.** The join is the part
 that could not fit a response, so it does not happen in one: `site/src/engine/localMux.mjs`
 is the same `Playlist` → `TsStream` → `Mp4Mux` chain the server runs, bundled into

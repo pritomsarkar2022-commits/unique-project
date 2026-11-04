@@ -478,7 +478,17 @@
     a.remove();
   }
 
+  // This host runs one file request at a time, so a preview that keeps buffering takes
+  // the slot the save is standing in line for.
+  function quietPlayer() {
+    var p = document.getElementById('player');
+    if (p) {
+      try { p.pause(); } catch (e) { /* a player that will not pause is not worth a save */ }
+    }
+  }
+
   function saveInPieces(url, name, note) {
+    quietPlayer();
     var start = 0;
     var total = null;
     var pieces = [];
@@ -486,9 +496,18 @@
     var dismiss = null;
     var beat = null;
 
-    function ask(range) {
+    // The link this asks twice is a link to this same origin, and the origin is a
+    // function the platform runs one at a time: a preview playing in this tab, or a
+    // second visitor, makes the answered link return an error page for a few hundred
+    // milliseconds. The piece is queued, not missing.
+    function ask(range, tryNo) {
       return fetch(url, { headers: { Range: range }, credentials: 'same-origin' }).then(function (r) {
         if (r.status !== 200 && r.status !== 206) {
+          if ((tryNo || 0) < 3) {
+            return new Promise(function (resolve) {
+              setTimeout(function () { resolve(ask(range, (tryNo || 0) + 1)); }, 500 * ((tryNo || 0) + 1));
+            });
+          }
           return Promise.reject(new Error('The download stopped at ' + fmtBytes(start) + '. Run the save again to pick it up from there.'));
         }
         return r.arrayBuffer().then(function (buf) {
@@ -681,6 +700,7 @@
   }
 
   function saveHere(s, btn) {
+    quietPlayer();
     var name = mp4Name(s);
     var ctl = mountSave(btn);
     btn.disabled = true;
@@ -712,6 +732,7 @@
         return;
       }
       if (/\.m3u8(\?|$)/i.test(url)) {
+        quietPlayer();
         var ctl = mountSave(directBtn);
         directBtn.disabled = true;
         runLocal({ manifestUrl: url, height: null }, mp4Name({ name: 'stream' }), ctl).then(function () {

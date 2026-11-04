@@ -38,17 +38,21 @@ const MEDIA = [
 ].join('\n');
 
 /**
- * @param {{fail?: string}} [opts] `fail` makes that url answer 404 instead of its body
+ * @param {{fail?: string, flaky?: {url: string, times: number}}} [opts] `fail` makes that
+ *   url answer 404 to every request; `flaky` makes it answer 404 `times` times and then
+ *   serve its body, which is what a queued request to this origin looks like.
  * @returns {{fetch: (url:string)=>Promise<object>, asked: string[]}}
  */
 function fakeSite(opts = {}) {
   const asked = [];
+  let flakyLeft = opts.flaky ? opts.flaky.times : 0;
   return {
     asked,
     async fetch(url) {
       const u = String(url);
       asked.push(u);
-      if (opts.fail === u) {
+      const refused = opts.fail === u || (opts.flaky !== undefined && opts.flaky.url === u && flakyLeft-- > 0);
+      if (refused) {
         return {
           ok: false,
           status: 404,
@@ -177,6 +181,21 @@ test('a part that does not arrive ends the save and says why', async () => {
   assert.equal(last.ev, 'error');
   assert.match(last.message, /did not arrive|HTTP/);
   assert.equal(typeof last.hint, 'string', 'the page prints the hint line, so it has to be a string');
+});
+
+test('a part that only answers late is asked again instead of ending the save', async () => {
+  // This origin is a function the platform runs one at a time, so a link that is busy
+  // answers an error page for a moment and the correct bytes afterwards. One attempt
+  // turns that into "the video did not download" for the visitor.
+  const site = fakeSite({ flaky: { url: HOST + 'seg0.ts', times: 2 } });
+  const run = await runWorker(source, site, { cmd: 'mux', manifestUrl: HOST + 'master.m3u8' });
+  const last = run.messages[run.messages.length - 1];
+  assert.equal(last.ev, 'done', JSON.stringify(run.messages));
+  assert.equal(run.closed, true);
+  assert.equal(site.asked.filter((u) => u === HOST + 'seg0.ts').length, 3, 'refused twice, served on the third ask');
+  const clean = fakeSite();
+  const whole = await runWorker(source, clean, { cmd: 'mux', manifestUrl: HOST + 'master.m3u8' });
+  assert.ok(concat(run.chunks).equals(concat(whole.chunks)), 'a save that waited writes the same file as one that did not');
 });
 
 test('a message that is not a save does nothing, and a save with no file says so', async () => {
