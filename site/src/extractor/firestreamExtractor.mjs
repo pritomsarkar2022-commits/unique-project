@@ -15,12 +15,17 @@ import { MediaSniffer } from './mediaSniffer.mjs';
 
 const S = '\\x09\\x0A\\x0B\\x0C\\x0D\\x20';
 const W = 'A-Za-z0-9';
+/** Their own ids are letters and digits; an embed slug in the wild also carries - and _. */
+const SLUG = 'A-Za-z0-9._~-';
 
 export class FirestreamExtractor extends BaseExtractor {
   static phpClass = 'FirestreamExtractor';
 
   hosts() {
-    return ['firestream.to', 'firestream.site', 'firestream.net', 'firestrm.com'];
+    // frstream.life is the same product on another domain: same token-blob, same
+    // /api/videos/<slug>/resolve, a page that 200s to anyone, so it has to be read
+    // here rather than left to the generic reader, which cannot make the POST.
+    return ['firestream.to', 'firestream.site', 'firestream.net', 'firestrm.com', 'frstream.life'];
   }
 
   priority() {
@@ -29,14 +34,14 @@ export class FirestreamExtractor extends BaseExtractor {
 
   async extract(pageUrl, http, visited = []) { // eslint-disable-line no-unused-vars
     const b = this.newBundle(pageUrl, 'firestream');
-    const res = await http.get(pageUrl, { headers: { Referer: pageUrl } });
+    const res = await http.get(pageUrl, { headers: this.pageHeaders(pageUrl) });
     this.fillMeta(b, res);
     if (!res.ok()) {
       throw new ExtractException('Firestream answered HTTP ' + res.status + '.', 'The video may be private or removed.', 'http_' + res.status);
     }
 
     let slug = null;
-    const s1 = new RegExp('/(?:e|v|embed|f)/([' + W + ']+)').exec(res.finalUrl);
+    const s1 = new RegExp('/(?:e|v|embed|f)/([' + SLUG + ']+)').exec(res.finalUrl);
     if (s1 !== null) {
       slug = s1[1];
     } else {

@@ -49,7 +49,7 @@ export class GenericExtractor extends BaseExtractor {
     const b = this.newBundle(pageUrl);
 
     let res = await http.get(pageUrl, {
-      headers: { Referer: pageUrl },
+      headers: this.pageHeaders(pageUrl),
       // A pasted address that ends in a file extension is worth one small read: a
       // copied m3u8 from a network tab is a file, while a page called something.webm
       // is a page. What the host answers is the only proof.
@@ -61,7 +61,7 @@ export class GenericExtractor extends BaseExtractor {
 
     if (MediaSniffer.kindOf(res.finalUrl) !== null && !res.isHtml()) {
       const s = Source.make(res.finalUrl, String(MediaSniffer.kindOf(res.finalUrl)));
-      s.headers = { Referer: pageUrl };
+      s.headers = this.pageHeaders(pageUrl);
       s.tokenExpiryFromQuery();
       b.finalUrl = res.finalUrl;
       if (await this.verify(s, http)) {
@@ -79,7 +79,7 @@ export class GenericExtractor extends BaseExtractor {
 
     // It was a page after all, so read the whole of it.
     if (MediaSniffer.kindOf(pageUrl) !== null) {
-      res = await http.get(pageUrl, { headers: { Referer: pageUrl }, accept: 'text/html,*/*;q=0.8' });
+      res = await http.get(pageUrl, { headers: this.pageHeaders(pageUrl), accept: 'text/html,*/*;q=0.8' });
     }
 
     this.fillMeta(b, res);
