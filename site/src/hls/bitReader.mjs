@@ -1,4 +1,4 @@
-import { intDiv } from '../support.mjs';
+import { intDiv } from '../supportPure.mjs';
 
 /**
  * MSB-first bit reader with the Exp-Golomb codes H.264 headers use.

@@ -6,7 +6,7 @@
 # proxied to one function so the browser keeps asking the same urls it always did.
 
 [build]
-  command = "node scripts/generate-views.mjs && node scripts/generate-static.mjs"
+  command = "node scripts/generate-engine.mjs && node scripts/generate-views.mjs && node scripts/generate-static.mjs"
   publish = "site/public"
   functions = "netlify/functions"
 

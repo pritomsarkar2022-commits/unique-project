@@ -108,7 +108,7 @@
   }
 
   /* ---------- state ---------- */
-  var state = { job: null, sources: [], activeId: null, hls: null, expires: 0 };
+  var state = { job: null, sources: [], activeId: null, hls: null, expires: 0, title: '' };
   var results = $('#results'), goBtn = $('#go-btn'), goLabel = $('#go-label'), busy = $('#busy-bar'), badge = $('#job-state');
 
   function setBusy(on) {
@@ -182,17 +182,29 @@
   window.vdReanalyze = runAnalyze;
 
   function renderError(data) {
+    var gated = data.code === 'gated';
+    var page = (urlInput.value || '').trim();
+    var hint = gated
+      ? 'Open the video in your browser, copy its .m3u8 or file address, and use Stream address below. That save runs on your device.'
+      : (data.hint || '');
     results.innerHTML =
       '<div class="notice err" style="flex-direction:column;align-items:stretch;gap:12px">' +
       '<div style="display:flex;gap:10px;align-items:flex-start">' +
       '<svg class="ic"><use href="#ic-cloud_off"/></svg>' +
       '<div><b class="label-lg">' + esc(data.error || 'No luck.') + '</b>' +
-      (data.hint ? '<div style="margin-top:4px;opacity:.85">' + esc(data.hint) + '</div>' : '') +
+      (hint ? '<div style="margin-top:4px;opacity:.85">' + esc(hint) + '</div>' : '') +
       '</div></div>' +
       '<div class="row-flex">' +
       '<button class="btn btn-tonal btn-sm" type="button" onclick="vdReanalyze()"><svg class="ic"><use href="#ic-refresh"/></svg> Try again</button>' +
+      (gated && /^https?:\/\//i.test(page)
+        ? '<a class="btn btn-outlined btn-sm" href="' + esc(page) + '" target="_blank" rel="noopener"><svg class="ic"><use href="#ic-open_in_new"/></svg> Open the player</a>'
+        : '') +
       '<button class="btn btn-text btn-sm" type="button" onclick="document.getElementById(\'url\').focus()"><svg class="ic"><use href="#ic-edit"/></svg> Change link</button>' +
       '</div></div>';
+    if (gated) {
+      var fold = document.querySelector('.direct');
+      if (fold) { fold.open = true; }
+    }
     results.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }
 
@@ -204,6 +216,7 @@
     state.job = data.job;
     state.sources = data.sources || [];
     state.expires = data.expiresAt || 0;
+    state.title = data.title || '';
     if (!state.sources.length) { renderError({ error: 'No file came back.', hint: 'The page shows a player, but its file would not answer.' }); return; }
 
     // Prefer a real mp4, then the fattest stream.
@@ -291,7 +304,6 @@
     return '<div class="player" id="player-box">' +
       '<video id="player" playsinline preload="metadata"' + (s.kind === 'mp4' || s.kind === 'webm' ? ' controls' : '') + '></video>' +
       '<button class="play-badge" id="play-badge" type="button" aria-label="Play preview"><svg class="ic"><use href="#ic-play_arrow"/></svg></button>' +
-      '<div class="player-note" id="player-note">The preview plays through this site. Your download is the original file.</div>' +
       '</div>';
   }
 
@@ -313,7 +325,6 @@
           state.hls = hls;
           hls.on(window.Hls.Events.ERROR, function (ev, d) {
             if (!d.fatal) { return; }
-            $('#player-note').textContent = 'The preview stopped. Download still works below.';
             if (d.type === window.Hls.ErrorTypes.NETWORK_ERROR) { hls.startLoad(); }
             else if (d.type === window.Hls.ErrorTypes.MEDIA_ERROR) { hls.recoverMediaError(); }
           });
@@ -354,8 +365,7 @@
     sc.onload = function () { var q = hlsQueue.slice(); hlsQueue = []; q.forEach(function (f) { f(); }); };
     sc.onerror = function () {
       hlsLoading = false;
-      $('#player-note').textContent = 'The stream player did not load. Download still works below.';
-      snack('The stream player could not load.');
+      snack('The stream player did not load. The download below still works.');
     };
     document.head.appendChild(sc);
   }
@@ -381,7 +391,7 @@
     var fmt = extLabel(s) || 'file';
     host.innerHTML =
       (isStream
-        ? '<button class="btn btn-filled btn-lg" type="button" id="build-btn"><svg class="ic"><use href="#ic-merge"/></svg> Save as one MP4</button>'
+        ? '<button class="btn btn-filled btn-lg" type="button" id="save-btn"><svg class="ic"><use href="#ic-merge"/></svg> Save as MP4</button>'
         : '<a class="btn btn-filled btn-lg" id="dl-link" href="' + esc(s.downloadUrl) + '" download><svg class="ic"><use href="#ic-download"/></svg> Download ' + esc(fmt) + '</a>') +
       '<button class="btn btn-tonal" type="button" id="copy-btn"><svg class="ic"><use href="#ic-link"/></svg> Copy link</button>' +
       (isStream
@@ -393,7 +403,7 @@
       copy.addEventListener('click', function () {
         var link = s.downloadUrl;
         copyText(link).then(function () {
-          snack('Link copied. The video host lets it work for a short time.', 'Show', function () { promptText(link); });
+          snack('Link copied.', 'Show', function () { promptText(link); });
         });
       });
     }
@@ -409,13 +419,11 @@
     var raw = $('#raw-btn');
     if (raw) {
       raw.addEventListener('click', function () {
-        saveInPieces(s.downloadUrl, 'stream.ts', 'The stream file is saving. Use Save as one MP4 for a normal video.');
+        saveInPieces(s.downloadUrl, 'stream.ts', 'Saving the stream file. Use Save as MP4 for a normal video.');
       });
     }
-    var build = $('#build-btn');
-    // Assigned rather than added so the finished button can drop this handler and
-    // become a plain download without starting a second build.
-    if (build) { build.onclick = function () { buildMp4(s, build); }; }
+    var save = $('#save-btn');
+    if (save) { save.onclick = function () { saveHere(s, save); }; }
   }
 
   function copyText(text) {
@@ -566,10 +574,162 @@
     });
   }
 
-  /* ---------- HLS to MP4 build ---------- */
+  /* ---------- saving here, on this device ---------- */
+  // The relay already hands the page a playlist whose every line is a same-origin signed
+  // url, so the browser can pull the parts one at a time and write the MP4 itself. That is
+  // why there is no size limit any more: the file never has to fit inside one answer from
+  // this host. The server builder below stays for the device that cannot do it.
+  var LOCAL = (function () {
+    var self = (document.currentScript && document.currentScript.src) || 'assets/js/app.js';
+    try {
+      var u = new URL('mux-worker.js', new URL(self, location.href));
+      var v = /[?&]v=([^&]+)/.exec(self);
+      return u.href + (v ? '?v=' + v[1] : '');
+    } catch (e) {
+      return null;
+    }
+  }());
+
+  function pickSink(name) {
+    if (window.showSaveFilePicker) {
+      return window.showSaveFilePicker({ suggestedName: name }).then(function (handle) {
+        return handle.createWritable().then(function (w) { return w; });
+      });
+    }
+    var parts = [];
+    return Promise.resolve(new WritableStream({
+      write: function (chunk) { parts.push(new Blob([chunk])); },
+      close: function () {
+        var href = URL.createObjectURL(new Blob(parts));
+        var a = document.createElement('a');
+        a.href = href;
+        a.download = name;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(function () { URL.revokeObjectURL(href); }, 60000);
+        snack('Saved ' + name + ' to your downloads.');
+      }
+    }));
+  }
+
+  function mountSave(btn) {
+    var box = document.createElement('div');
+    box.className = 'save';
+    box.innerHTML = '<div class="save-line"><span id="save-head">Writing here</span>' +
+      '<span id="save-pct">starting</span></div>' +
+      '<div class="progress"><i id="save-fill" style="width:0%"></i></div>' +
+      '<div class="save-line"><span>Keep this tab open</span>' +
+      '<button class="btn btn-text btn-sm" type="button" id="save-cancel">Stop</button></div>';
+    btn.parentNode.insertBefore(box, btn.nextSibling);
+    btn.classList.add('hide');
+    var cancel = function () { };
+    box.querySelector('#save-cancel').addEventListener('click', function () { cancel(); });
+    function setPct(pct, text) {
+      box.querySelector('#save-fill').style.width = Math.max(0, Math.min(100, pct)) + '%';
+      box.querySelector('#save-pct').textContent = text;
+    }
+    return {
+      head: function (text) { box.querySelector('#save-head').textContent = text; },
+      set: setPct,
+      line: function (m) {
+        setPct(m.total ? Math.floor((m.done / m.total) * 100) : 0,
+          m.done + ' of ' + (m.total || '?') + ' parts · ' + fmtBytes(m.bytes || 0));
+      },
+      stop: function (fn) { cancel = fn; },
+      remove: function () { box.remove(); btn.classList.remove('hide'); btn.disabled = false; },
+      keep: function (label) {
+        box.remove();
+        btn.disabled = false;
+        btn.classList.remove('hide');
+        btn.innerHTML = '<svg class="ic"><use href="#ic-download"/></svg> ' + esc(label);
+      }
+    };
+  }
+
+  function runLocal(job, name, ctl) {
+    return pickSink(name).then(function (stream) {
+      return new Promise(function (resolve, reject) {
+        var worker = new Worker(LOCAL);
+        var settled = false;
+        ctl.stop(function () {
+          settled = true;
+          worker.terminate();
+          if (stream.abort) { stream.abort().catch(function () { }); }
+          reject({ name: 'AbortError' });
+        });
+        worker.onmessage = function (e) {
+          var m = e.data || {};
+          if (m.ev === 'progress') { ctl.line(m); }
+          else if (m.ev === 'done') { settled = true; worker.terminate(); resolve(); }
+          else if (m.ev === 'error') { settled = true; worker.terminate(); reject(new Error(m.message || 'The local saver stopped.')); }
+        };
+        worker.onerror = function () {
+          if (!settled) { settled = true; worker.terminate(); reject(new Error('The local saver did not start.')); }
+        };
+        worker.postMessage({
+          cmd: 'mux',
+          stream: stream,
+          manifestUrl: job.manifestUrl,
+          height: job.height || null
+        }, [stream]);
+      });
+    });
+  }
+
+  function saveHere(s, btn) {
+    var name = mp4Name(s);
+    var ctl = mountSave(btn);
+    btn.disabled = true;
+    runLocal({ manifestUrl: s.previewUrl, height: s.height }, name, ctl).then(function () {
+      ctl.remove();
+      snack('Your MP4 is saved on this device.');
+    })['catch'](function (err) {
+      ctl.remove();
+      if (err && err.name === 'AbortError') { return; }
+      snack((err && err.message ? err.message : 'This device could not write it.') + ' Finishing it here instead.');
+      buildMp4(s, btn, true);
+    });
+  }
+
+  function mp4Name(s) {
+    var base = (s.name || state.title || nameFromLink(s.downloadUrl) || 'video').replace(/\.mp4$/i, '');
+    return base.slice(0, 80) + '.mp4';
+  }
+
+  /* ---------- a stream address the visitor copied from their player ---------- */
+  var directBtn = $('#direct-btn'), directInput = $('#direct-url');
+  if (directInput) { bindField(directInput); }
+  if (directBtn) {
+    directBtn.addEventListener('click', function () {
+      var url = (directInput.value || '').trim();
+      if (!/^https?:\/\/\S+$/i.test(url)) {
+        directInput.closest('.field').classList.add('is-error');
+        snack('Paste the .m3u8 or file address from your player.');
+        return;
+      }
+      if (/\.m3u8(\?|$)/i.test(url)) {
+        var ctl = mountSave(directBtn);
+        directBtn.disabled = true;
+        runLocal({ manifestUrl: url, height: null }, mp4Name({ name: 'stream' }), ctl).then(function () {
+          ctl.remove();
+          snack('Saved on this device.');
+        })['catch'](function (err) {
+          ctl.remove();
+          directBtn.disabled = false;
+          snack(err && err.name === 'AbortError' ? 'Stopped.' : (err.message || 'That address did not answer. A site that checks its visitors will not answer this page either.'));
+        });
+      } else {
+        saveInPieces(url, (decodeURIComponent(url.split('/').pop().split('?')[0]) || 'video').slice(0, 80));
+      }
+    });
+  }
+
+  /* ---------- the server builder, for a device that cannot write the file here ---------- */
   function buildMp4(s, btn) {
     btn.disabled = true;
-    btn.innerHTML = '<span class="spinner"></span> Starting';
+    var ctl = mountSave(btn);
+    ctl.head('Built on this site');
     fetch(API + '?r=build', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -578,19 +738,16 @@
     }).then(function (r) { return r.json().catch(function () { return { ok: false, error: 'The MP4 builder is not answering.' }; }); })
       .then(function (d) {
         if (!d.ok) {
-          btn.disabled = false;
-          btn.innerHTML = '<svg class="ic"><use href="#ic-merge"/></svg> Save as one MP4';
+          ctl.remove();
           snack(d.error || 'That stream cannot be turned into an MP4 here.');
           return;
         }
         poll(d.build);
       }).catch(function () {
-        btn.disabled = false;
-        btn.innerHTML = '<svg class="ic"><use href="#ic-merge"/></svg> Save as one MP4';
+        ctl.remove();
         snack('Could not reach this site. Try again.');
       });
 
-    var barHost = $('#actions');
     function poll(buildId) {
       var stop = false;
       function step() {
@@ -598,26 +755,23 @@
         fetch(API + '?r=progress&build=' + encodeURIComponent(buildId), { credentials: 'same-origin' })
           .then(function (r) { return r.json(); })
           .then(function (p) {
-            renderProgress(p, btn);
+            if (p.error) {
+              stop = true;
+              ctl.remove();
+              snack(p.error);
+              return;
+            }
+            ctl.set(Number(p.percent || 0), (p.segments || '?') + ' parts');
             if (p.done) {
               stop = true;
-              btn.disabled = false;
-              btn.innerHTML = '<svg class="ic"><use href="#ic-download"/></svg> Download MP4';
-              btn.onclick = null;
-              saveInPieces(p.fileUrl, p.filename || 'video.mp4', 'Your MP4 is saving.');
-              snack('Your MP4 is ready.', 'Save again', function () { saveInPieces(p.fileUrl, p.filename || 'video.mp4'); });
+              ctl.keep('Download MP4');
+              btn.onclick = function () { saveInPieces(p.fileUrl, p.filename || 'video.mp4', 'Saving your MP4.'); };
+              snack('Your MP4 is ready.', 'Save it', function () { btn.onclick(); });
             } else { setTimeout(step, 1200); }
-          }).catch(function () { stop = true; btn.disabled = false; btn.textContent = 'Save as one MP4'; });
+          }).catch(function () { stop = true; ctl.remove(); });
       }
       step();
-      void barHost;
     }
-  }
-
-  function renderProgress(p, btn) {
-    var pct = Math.max(0, Math.min(100, Number(p.percent || 0)));
-    btn.innerHTML = '<svg class="ic"><use href="#ic-hub"/></svg> ' + pct + '% of ' + (p.segments || '?') + ' parts';
-    if (p.error) { btn.innerHTML = '<svg class="ic"><use href="#ic-error"/></svg> ' + esc(p.error); }
   }
 
   /* ---------- expiry countdown ---------- */

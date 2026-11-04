@@ -12,14 +12,22 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 /**
  * Differential parity for the two pages a visitor actually looks at.
  *
- * The engine suites prove the mp4 is the same file; this proves the html is the same
- * document, including the whitespace php leaves behind its inline if-blocks, which is
- * the part a hand-written template always gets wrong.
+ * The engine suites prove the mp4 is the same file; this proves the parts of the html
+ * that are computed are the same bytes, including the whitespace php leaves behind its
+ * inline if-blocks, which is the part a hand-written template always gets wrong.
  *
  * The reference renders come from `parity/oracle-views.php`, which requires the
  * untouched `source/views/*.php` and captures the output buffer. ASSET_VER is pinned
  * there (it is a filemtime the two checkouts cannot agree on) and passed to the port as
  * `assetVer`, so the version digits line up without either side faking the other.
+ *
+ * Home is compared as four fragments, not as one document, because the page itself is
+ * the owner's design: the prose was cut and the sections re-arranged, so a whole-file
+ * comparison would only ever report where the copy was removed. What is left is what a
+ * change to the php would have to agree about, and each of those is still byte-exact:
+ * the <head> (title, canonical, og:url, base_href asset paths, ASSET_VER), the chip per
+ * host, the table row per reader group, and the footer year. The error page is a whole
+ * document still, because nothing about it was restyled.
  */
 
 const diff = new Diff();
@@ -109,6 +117,16 @@ for (const p of probes.filter((pr) => pr.solo)) {
 // ever disagree in those four characters.
 const year = new Date().getFullYear();
 
+const homeFragments = {
+  head: (s) => s.slice(0, s.indexOf('</head>') + 7),
+  chips: (s) => (s.match(/<span class="chip">[\s\S]*?<\/span>/g) ?? []).join('\n'),
+  rows: (s) => (s.match(/<tr>[\s\S]*?<\/tr>/g) ?? []).join('\n'),
+  year: (s) => {
+    const m = /&copy; \d{4} [^<]*</.exec(s);
+    return m === null ? '' : m[0];
+  },
+};
+
 for (const w of want) {
   const php = out.get(w.id);
   if (!diff.ok(`${w.id}: oracle answered`, php && php.ok, php ? String(php.err) : 'no line')) {
@@ -129,11 +147,26 @@ for (const w of want) {
   } else {
     actual = renderError({ notFound: w.notFound, fatal: w.fatal, baseHref: '/', assetVer: PINNED_ASSET_VER });
   }
-  if (!diff.ok(`${w.id}: html identical (${expected.length} bytes)`, actual === expected, firstByteDiff(actual, expected))) {
-    fs.mkdirSync(path.join(here, '..', 'capture', 'views', 'fail'), { recursive: true });
-    fs.writeFileSync(path.join(here, '..', 'capture', 'views', 'fail', w.id + '.php.html'), expected, 'binary');
-    fs.writeFileSync(path.join(here, '..', 'capture', 'views', 'fail', w.id + '.js.html'), actual, 'binary');
+  if (w.kind === 'error') {
+    if (!diff.ok(`${w.id}: html identical (${expected.length} bytes)`, actual === expected, firstByteDiff(actual, expected))) {
+      writeFail(w.id, expected, actual);
+    }
+    continue;
   }
+  diff.ok(`${w.id}: the oracle produced a home page`, expected.length > 6000, expected.length + ' bytes');
+  for (const [name, pick] of Object.entries(homeFragments)) {
+    const wantText = pick(expected);
+    const gotText = pick(actual);
+    if (!diff.ok(`${w.id}: ${name} fragment identical (${wantText.length} bytes)`, gotText === wantText, firstByteDiff(gotText, wantText))) {
+      writeFail(w.id, expected, actual);
+    }
+  }
+}
+
+function writeFail(id, phpHtml, jsHtml) {
+  fs.mkdirSync(path.join(here, '..', 'capture', 'views', 'fail'), { recursive: true });
+  fs.writeFileSync(path.join(here, '..', 'capture', 'views', 'fail', id + '.php.html'), phpHtml, 'binary');
+  fs.writeFileSync(path.join(here, '..', 'capture', 'views', 'fail', id + '.js.html'), jsHtml, 'binary');
 }
 
 /** base_href(): the front controller's own directory, with a trailing slash. */
