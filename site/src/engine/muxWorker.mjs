@@ -16,19 +16,40 @@ function plain(bytes) {
   return out;
 }
 
-async function bytesOf(url, signal) {
-  const res = await fetch(url, { signal, redirect: 'follow', credentials: 'omit' });
-  if (!res.ok) {
-    throw new Error('The video host answered HTTP ' + res.status + '.');
+/**
+ * One part, asked for as many times as it takes.
+ *
+ * A part that fails here is a fetch to this same origin, and the origin is a function
+ * the platform will only run one at a time: a preview playing in the tab, a second tab,
+ * or a second visitor makes the answered link return the platform's own error page for a
+ * few hundred milliseconds. The part is not missing, it is queued, and the save that
+ * gives up on the first one is the failure people describe as "it never downloads".
+ */
+async function fetchPart(url, signal, attempts = 4) {
+  let last = null;
+  for (let tryNo = 0; tryNo < attempts; tryNo += 1) {
+    const res = await fetch(url, { signal, redirect: 'follow', credentials: 'omit' });
+    if (res.ok) {
+      return res;
+    }
+    last = res;
+    if (signal.aborted) {
+      break;
+    }
+    // A 404 from the video host would answer the same way, so this waits it out rather
+    // than trusting the status; the backoff only has to outlast one queued invocation.
+    await new Promise((resolve) => setTimeout(resolve, 500 * (tryNo + 1)));
   }
+  throw new Error('The video host answered HTTP ' + last.status + '.');
+}
+
+async function bytesOf(url, signal) {
+  const res = await fetchPart(url, signal);
   return plain(new Uint8Array(await res.arrayBuffer()));
 }
 
 async function textOf(url, signal) {
-  const res = await fetch(url, { signal, redirect: 'follow', credentials: 'omit' });
-  if (!res.ok) {
-    throw new Error('The video host answered HTTP ' + res.status + '.');
-  }
+  const res = await fetchPart(url, signal);
   return await res.text();
 }
 
