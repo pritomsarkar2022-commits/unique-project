@@ -640,6 +640,67 @@ test('the relay rewrites a playlist so every line comes back through this origin
     'a relative segment line is resolved against the manifest, exactly as php rewrote it');
 });
 
+/**
+ * The contract the in-page muxer walks.
+ *
+ * site/src/engine/localMux.mjs runs on the visitor's own device, one small relay fetch
+ * per part, and it has no cookies for the video host and no CORS on its side of the
+ * request. That only works if a rewritten playlist leaves no off-origin address behind,
+ * so this follows the whole path a browser would: master, variant, then the key and the
+ * segment out of the media playlist. Every link it finds must be this origin's, must
+ * carry this job's signature, and must be signed for the url it stands for.
+ */
+test('a rewritten playlist is walkable by the browser with nothing but this origin', async () => {
+  const store = jobStore();
+  const masterUrl = 'https://cdn.cloudfam.io/hls/master.m3u8';
+  const variantUrl = 'https://cdn.cloudfam.io/hls/720/index.m3u8';
+  const keyUrl = 'https://cdn.cloudfam.io/hls/keys/abc';
+  const segmentUrl = 'https://cdn.cloudfam.io/hls/720/seg/1.ts';
+  const media = [
+    '#EXTM3U',
+    '#EXT-X-TARGETDURATION:10',
+    '#EXT-X-KEY:METHOD=AES-128,URI="https://cdn.cloudfam.io/hls/keys/abc",IV=0X1234',
+    '#EXTINF:10.0,',
+    'seg/1.ts',
+    '#EXT-X-ENDLIST',
+  ].join('\n');
+  const { record, query } = await relayQuery(store, masterUrl, { p: '1' });
+  const http = stubHttp((url) => res(200, url === masterUrl
+    ? '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=4000000,RESOLUTION=1280x720\n720/index.m3u8\n'
+    : media, { 'content-type': 'application/vnd.apple.mpegurl' }, url));
+  const relayTo = (absoluteUrl) => handle(get('/relay?' + new URL(absoluteUrl).searchParams.toString()), {
+    jobs: store, http, resolve: async () => '93.184.216.34',
+  });
+
+  const master = await handle(get('/relay?' + query), {
+    jobs: store, http, resolve: async () => '93.184.216.34',
+  });
+  const variant = await relayTo(master.body.split('\n')[2]);
+  assert.equal(variant.status, 200, 'the child link the master handed out is a valid relay link');
+
+  const body = variant.body;
+  const offOrigin = (body.match(/https?:\/\/[^\s,"]+/g) ?? []).filter((u) => !u.startsWith('https://grably.test/'));
+  assert.deepEqual(offOrigin, [], 'the browser never has to leave this origin');
+  assert.equal(body.includes('cdn.cloudfam.io'), false, 'not one host url survives the rewrite');
+
+  const keyLine = body.split('\n').find((l) => l.startsWith('#EXT-X-KEY'));
+  const keyLink = /URI="([^"]+)"/.exec(keyLine)[1];
+  assert.match(keyLink, /^https:\/\/grably\.test\/index\.php\?r=relay&job=/);
+  const keyParams = new URL(keyLink).searchParams;
+  assert.equal(keyParams.get('p'), null, 'a key is bytes, so it is never asked for as a manifest');
+  assert.match(keyLine, /,IV=0X1234/, 'the tag around the rewritten uri is untouched');
+  assert.equal(store.verify(record, keyUrl, keyParams.get('s')), true, 'signed for the resolved key url');
+  assert.equal(linkOpen(keyParams.get('u'), String(record.secret)), keyUrl);
+
+  const segmentLink = body.split('\n').find((l) => l.startsWith('https://grably.test'));
+  const segmentParams = new URL(segmentLink).searchParams;
+  assert.equal(store.verify(record, segmentUrl, segmentParams.get('s')), true, 'signed for the resolved segment url');
+
+  // and the walk actually ends: a relay fetch of that segment link returns the bytes
+  const segment = await relayTo(segmentLink);
+  assert.equal(segment.status, 200);
+});
+
 test('download mode names the file the way addslashes did', async () => {
   const store = jobStore();
   const url = 'https://cdn.cloudfam.io/f/abc123.mp4?token=xyz';

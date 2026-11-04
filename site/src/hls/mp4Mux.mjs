@@ -9,7 +9,7 @@
  * Muxes H.264 + AAC-LC, which is what these hosts serve. Anything else is refused
  * with a message rather than producing a file that will not play.
  */
-import { phpRound, intDiv } from '../support.mjs';
+import { phpRound, intDiv } from '../supportPure.mjs';
 import { ExtractException } from '../errors.mjs';
 
 const VIDEO = 1;
@@ -85,6 +85,19 @@ export class Mp4Mux {
   /** The finished file: ftyp, every mdat, then the moov. */
   toBuffer() {
     return Buffer.concat(this.#out);
+  }
+
+  /**
+   * Hand back the bytes buffered since the last call and forget them.
+   *
+   * A build on a device does not have to hold the file it is writing, so the writer
+   * drains after each part. The order is the order the file is in, and #written keeps
+   * counting from the first ftyp, so the offsets packed into the log do not move.
+   */
+  takeOutput() {
+    const out = Buffer.concat(this.#out);
+    this.#out = [];
+    return out;
   }
 
   /** The sidecar log bytes php would have written, for the parity test. */

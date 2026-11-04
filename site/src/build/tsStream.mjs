@@ -9,7 +9,7 @@
 import { TsDemuxer } from '../hls/tsDemuxer.mjs';
 import { Avc } from '../hls/avc.mjs';
 import { Aac } from '../hls/aac.mjs';
-import { phpRound } from '../support.mjs';
+import { phpRound } from '../supportPure.mjs';
 
 export class TsStream {
   #demux = new TsDemuxer();

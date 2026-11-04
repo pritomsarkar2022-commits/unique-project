@@ -2,11 +2,13 @@
 
 Paste a video page link, get the underlying file: progressive download or HLS stream,
 played in the page and saved as one MP4. This is the php app in `source/` ported to
-Node so it can run on Netlify's static + functions platform. The UI, the wording, the
-features and the failure messages are the original's; nothing in `site/assets` or
-`site/templates` was redesigned. The only front-end change is invisible until a file is
-big: the save button now asks for the file in ranged pieces instead of in one response
-(see *What the platform forces* below), because a function response cannot hold a movie.
+Node so it can run on Netlify's static + functions platform. Every string the app
+*computes* — the refusal wordings, the notices, the host table, the head tags — is the
+original's and is diffed against it. Two things are deliberately not the original's:
+the page's own prose and layout, which are cut to one full-width tool band for phones,
+and where the MP4 gets built, which is now the visitor's own device instead of a
+function response (see *What the platform forces* below), because a function response
+cannot hold a movie.
 
 ## Status: every layer is ported
 
@@ -16,10 +18,11 @@ big: the save button now asks for the file in ranged pieces instead of in one re
 | Outbound HTTP, SSRF wall, certificate handling (`site/src/net`) | ported, byte-compared against the original |
 | Job/build storage, Netlify Blobs + filesystem drivers (`site/src/storage`) | ported, tested |
 | Extractors for every supported host (`site/src/extractor`) | ported, tested against the original |
-| Static page and front-end script (`site/public` via `npm run build`) | generated from the captured php markup, unchanged |
+| Static page and front-end script (`site/public` via `npm run build`) | the owner's design; every computed string still the original's |
+| Device-side join (`site/src/engine` → `site/assets/js/mux-worker.js`) | same engine, second runner; output byte-identical to the server build |
 | HTTP entry point (`netlify/functions/router.mjs`, `site/src/http/router.mjs`) | ported, tested route by route |
 | Relay's byte-serving half (`r=relay`, `r=file`) | ported, tested against a live 60 MB file |
-| Dynamic views (`site/src/views`) | ported, byte-compared against the original (42 probes) |
+| Dynamic views (`site/src/views`) | ported; head, chips, rows and year fragment-compared, error page byte-compared (106 checks) |
 
 `netlify.toml` routes `/index.php`, `/api/*`, `/relay`, `/health` and `/sitemap.xml` to
 `/.netlify/functions/router`, which imports `site/src/http/router.mjs` — the same
@@ -46,16 +49,46 @@ end-to-end: a 61,878,609-byte file from `archive.org` came through the relay in 
 and hashed `46f62396c755e1ed0ab856a1521378d54196e125ef1a1643a199af087a15046b` — the same
 sha256 as the bytes pulled straight from the file host.
 
-The join (`Save as one MP4`) has its own ceiling: `build.output_max_bytes`, 20 MB,
-against the original's `build.max_bytes` of 1.5 GB. Each build tick reads and rewrites the
-whole partial file through blob storage, so the output size is the working-set size. A
-master playlist whose bandwidth and duration are both known is refused before the first
-part is fetched — `"That quality joins to about 23.1 MB, and this site saves one MP4 up to
-20 MB."` (`site/src/build/buildRunner.mjs:63`) — and one that grows past the cap mid-build
-stops with `"This file grew past 20 MB."` (`site/src/build/buildRunner.mjs:174`), both with
-`"Pick a lower quality if the page offers one."`.
-**Save stream file** has no such limit — a raw `.ts` is relayed, not joined, and comes
-down in pieces.
+**`Save as MP4` runs on the visitor's device, not in the function.** The join is the part
+that could not fit a response, so it does not happen in one: `site/src/engine/localMux.mjs`
+is the same `Playlist` → `TsStream` → `Mp4Mux` chain the server runs, bundled into
+`site/assets/js/mux-worker.js` by `scripts/generate-engine.mjs` and started by
+`runLocal()` (`site/assets/js/app.js:670`). The page hands it one thing — a `WritableStream`
+for the file the visitor picked (or, where the browser has no picker, a blob sink that ends
+in a download) — and the worker pulls the parts one at a time over the relay links the page
+already holds signatures for. Nothing is capped, because no finished file ever passes
+through Netlify: only the part bytes do, each in its own small response.
+
+Two properties hold that up, and both are tested rather than asserted:
+
+- The rewritten playlist is *walkable from the browser alone*. `site/tests/router.test.mjs`
+  follows master → variant → key → segment and requires that not one host address survives
+  the rewrite, that every link is this origin's and carries this job's signature, and that a
+  key link is not flagged `&p=1`. The device therefore needs no cookies for the video host
+  and no CORS from it.
+- The device file *is* the server file. `site/tests/localMux.test.mjs` builds the same
+  fixtures on both paths and compares bytes, clear and AES-128; `site/tests/muxWorker.test.mjs`
+  runs the committed bundle in a bare sandbox with no node and no `Buffer` and compares it
+  against the module; and the pure-JS block cipher in `site/src/engine/aesCbc.mjs` — needed
+  because Web Crypto refuses an unpadded CBC open — is compared with node's
+  `createDecipheriv(…, setAutoPadding(false))`.
+
+Verified live: `https://luluvido.com/ielty32jjdm9`, an AES-128 HLS stream of 26 parts,
+muxed by the browser worker into 69,881,386 bytes in 39 s and sha256
+`1a83ec9ddc904c702cb23fae47e699f0854ecf41aac210199ebd2ca27fbd630d`; the node engine over the
+same relay links produced the same hash, differing only in the five `mvhd`/`tkhd`/`mdhd`
+clock fields.
+
+The server join stays as the fallback the page reaches when a device cannot write a file at
+all, and it keeps the ceilings it was written with: `build.output_max_bytes` is 20 MB against
+the original's `build.max_bytes` of 1.5 GB, because each build tick reads and rewrites the
+whole partial file through blob storage. A master playlist whose bandwidth and duration are
+both known is refused before the first part is fetched — `"That quality joins to about 23.1 MB,
+and this site saves one MP4 up to 20 MB."` (`site/src/build/buildRunner.mjs:65`) — and one that
+grows past the cap mid-build stops with `"This file grew past 20 MB."`
+(`site/src/build/buildRunner.mjs:176`), both with `"Pick a lower quality if the page offers
+one."`. **Save stream file** has never had that limit — a raw `.ts` is relayed, not joined, and
+comes down in pieces.
 
 The function's 60-second synchronous limit is why `build.tick_seconds` is 10 and the
 saver polls `r=progress` until the build finishes: the work is one slice per request, not
@@ -64,12 +97,21 @@ one request per file.
 ## Running what is here
 
 ```
-npm run build      # site/public from site/templates + site/assets
-npm test           # 121 unit and route tests, node >= 22
+npm run build      # engine bundle, then site/public from site/templates + site/assets
+npm run engine     # site/assets/js/mux-worker.js only (esbuild over site/src/engine)
+npm test           # 146 unit, route, view and bundle tests, node >= 22
 npm run parity     # differential tests; needs a php binary, see PHP_BIN below
 npm run deploy-sim # bundles the function the way netlify does, then runs it
 node scripts/serve.mjs 8099   # the whole site locally, router included
 ```
+
+`npm run build` runs the engine step first because `generate-views.mjs` hashes
+`app.css`, `material.css`, `app.js` and `mux-worker.js` into one `ASSET_VER`, and
+`netlify.toml` caches `/assets/*` for 30 days: an engine change that did not move the hash
+would leave every visitor's phone running the old muxer out of the edge cache. A build
+also fails loudly if the worker's import graph reaches a `node:` builtin
+(`scripts/generate-engine.mjs`), which is the one thing that would only surface as a dead
+save button on a device.
 
 `scripts/serve.mjs` mirrors `netlify.toml` on plain node: the same paths go to the same
 `handle()`, the rest comes out of `site/public` with the same cache headers, and storage
@@ -134,7 +176,7 @@ it on disk:
 git clone https://github.com/pritomsarkar2022-commits/downloader-website-.git source
 ```
 
-## Three things the port does differently, on purpose
+## Five things the port does differently, on purpose
 
 1. **Storage.** The php app kept flat files under `storage/`. Here the same records go
    through `site/src/storage/kv.mjs`, which is the filesystem on a machine that has one
@@ -181,6 +223,24 @@ git clone https://github.com/pritomsarkar2022-commits/downloader-website-.git so
    Neither of them goes around a browser check. A host that answers Cloudflare's
    challenge to this server is reported as `gated`, and always will be.
 
+4. **The join moved to the device.** The php app built the mp4 inside the request and had
+   no response ceiling to respect; a Netlify function does, so `Save as MP4` now means a
+   worker on the visitor's own machine writing the file the visitor picked. The engine is
+   the same code, not a re-implementation — see
+   [What the platform forces](#what-the-platform-forces-and-where-it-shows) above for the
+   two properties that prove it and the live 66 MB AES-128 comparison. The server build
+   survives only as the page's fallback (`buildMp4` in `site/assets/js/app.js`), which is
+   why its old limits are still there and still byte-identical to php's.
+5. **The page copy is the owner's design, so the views suite compares fragments.** The home
+   page was cut to one tool band: 4,563 characters of visible prose and 844 words became
+   997 and 164, and the document itself went from 28,040 to 15,153 bytes at the same host
+   list. `parity/test-views.mjs` therefore no longer compares the whole home document — it
+   would only ever report where prose was removed — and compares instead the four things
+   the php *computes*: the `<head>` (title, canonical, `og:url`, `base_href` asset paths,
+   `ASSET_VER`), the `<span class="chip">` per host, the `<tr>` per reader group, and the
+   footer year. Every other suite is still whole-output byte equality, including the error
+   page, which was not restyled.
+
 ## Cost, if you are on a free host
 
 This design moves video bytes through the server: the relay re-serves playlists and
@@ -189,7 +249,8 @@ is metered at 20 credits per GB against 300 credits a month, so roughly 15 GB fo
 whole site — about 150 MB per download leaves no room for anything else. Hosting this
 faithfully means either a paid plan or a host with unmetered egress.
 
-Assembling the file in the browser does not change that arithmetic: the same bytes still
-pass through the function, and a save in eight pieces costs eight requests' worth of
-function duration plus a few hundred bytes of headers per piece. What it does change is
-what one request can be — 18 MiB — so a large file no longer needs a larger response.
+Moving the join to the device does not change the byte count: every part still leaves the
+function once, so a 26-part save is 26 relay responses plus one signed manifest fetch. What
+it removes is the other half of the cost — the build ticks, each of which read and rewrote
+the whole partial file through blob storage, and the response size that had to stay under
+18 MiB. A device save costs the function no write at all, and no storage.

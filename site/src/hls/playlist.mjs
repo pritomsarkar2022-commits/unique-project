@@ -1,5 +1,5 @@
 import { cfg } from '../config.mjs';
-import { urlAbsolutize, phpTrim, phpInt, phpFloat } from '../support.mjs';
+import { urlAbsolutize, phpTrim, phpInt, phpFloat } from '../supportPure.mjs';
 
 /**
  * Reads HLS playlists and rewrites them so a browser can play a cross-origin

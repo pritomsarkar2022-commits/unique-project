@@ -9,7 +9,8 @@
   },
   "scripts": {
     "views": "node scripts/generate-views.mjs",
-    "build": "node scripts/generate-views.mjs && node scripts/generate-static.mjs",
+    "engine": "node scripts/generate-engine.mjs",
+    "build": "node scripts/generate-engine.mjs && node scripts/generate-views.mjs && node scripts/generate-static.mjs",
     "test": "node --test --test-timeout=30000 site/tests/*.test.mjs",
     "deploy-sim": "node scripts/deploy-sim.mjs",
     "parity": "node parity/test-support.mjs && node parity/test-engine.mjs && node parity/test-unpack.mjs && node parity/test-media.mjs && node parity/test-stores.mjs && node parity/test-views.mjs"
