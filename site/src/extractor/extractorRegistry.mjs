@@ -14,13 +14,17 @@ import { strtolowerBytes } from './baseExtractor.mjs';
  * **`async forUrl(url)`** and `knownHosts` is **`async knownHosts()`**: the router and
  * the analysers must `await` them.
  *
- * ## How the twelve host extractors plug in
+ * ## How the twelve host extractors plus generic plug in
  *
  * HOST_EXTRACTORS below is the php constructor list, in the same order, naming the
- * module and the class a ported extractor must export. A new file at that path with
- * that class name is picked up by itself; nothing in this file is edited, and an
- * entry whose module does not exist yet is skipped (recorded in
- * `registry.missingModules`) rather than crashing the site.
+ * module and the class a ported extractor must export. LOADERS below it names the
+ * same module again as a literal `import()` specifier, and both lines are needed:
+ * Netlify builds a function with esbuild, which only follows a dynamic import it can
+ * read as a string constant. `await import(variable)` survives type-checking but
+ * resolves against the single bundled file at runtime, where no extractor module
+ * exists on disk - so every extractor looks "missing", and a deploy serves a site
+ * with no hosts and no analysers. An entry whose module is not there is still
+ * skipped (recorded in `registry.missingModules`) rather than crashing the site.
  */
 
 /** Registration order is loadable: forUrl() scores with strict `>`, so ties go to the
@@ -42,6 +46,30 @@ export const HOST_EXTRACTORS = [
   // ones that hide it inside packed player js.
   ['./genericExtractor.mjs', 'GenericExtractor'],
 ];
+
+/**
+ * The literal importers, one per module the plan can name. `() => import('./x.mjs')`
+ * is what esbuild reads; the specifier has to be a string written in this file, so
+ * this object is the price the port pays for running on a bundled platform.
+ */
+const importers = {
+  './blockedExtractor.mjs': () => import('./blockedExtractor.mjs'),
+  './youtubeExtractor.mjs': () => import('./youtubeExtractor.mjs'),
+  './streamtapeExtractor.mjs': () => import('./streamtapeExtractor.mjs'),
+  './streamfileExtractor.mjs': () => import('./streamfileExtractor.mjs'),
+  './luluvidoExtractor.mjs': () => import('./luluvidoExtractor.mjs'),
+  './firestreamExtractor.mjs': () => import('./firestreamExtractor.mjs'),
+  './playmateExtractor.mjs': () => import('./playmateExtractor.mjs'),
+  './vidaraExtractor.mjs': () => import('./vidaraExtractor.mjs'),
+  './vixeoExtractor.mjs': () => import('./vixeoExtractor.mjs'),
+  './cloudfamExtractor.mjs': () => import('./cloudfamExtractor.mjs'),
+  './mxdropExtractor.mjs': () => import('./mxdropExtractor.mjs'),
+  './xfsExtractor.mjs': () => import('./xfsExtractor.mjs'),
+  './genericExtractor.mjs': () => import('./genericExtractor.mjs'),
+};
+
+/** The plan's module path -> its importer. A path with no importer reads as unwritten. */
+const LOADERS = new Map(HOST_EXTRACTORS.map(([modulePath]) => [modulePath, importers[modulePath]]));
 
 /** php's two-letter ccTLD tail table: a "co.uk" suffix belongs to the registrable name. */
 const CC_TAILS = ['co', 'com', 'net', 'org', 'gov', 'edu', 'ac', 'mil', 'ne', 'or', 'go', 'lg'];
@@ -214,12 +242,20 @@ function trimDots(s) {
 }
 
 async function loadClass(modulePath, className, missing) {
+  const load = LOADERS.get(modulePath);
+  if (typeof load !== 'function') {
+    missing.push(modulePath);
+    return null;
+  }
   let mod;
   try {
-    mod = await import(modulePath);
+    mod = await load();
   } catch (err) {
-    const absent = err && err.code === 'ERR_MODULE_NOT_FOUND'
-      && new RegExp(String(modulePath).split('/').pop().replace(/\./g, '\\.')).test(String(err.message));
+    // The extractor file itself is absent, so nothing was written for that host yet.
+    // A missing dependency further down has a different name in the message and is
+    // a real fault, so it still throws.
+    const basename = String(modulePath).split('/').pop();
+    const absent = err && err.code === 'ERR_MODULE_NOT_FOUND' && String(err.message).includes(basename);
     if (!absent) {
       throw err;
     }

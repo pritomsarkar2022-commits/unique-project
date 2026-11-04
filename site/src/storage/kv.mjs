@@ -51,9 +51,10 @@ export function kvRoot(env = process.env) {
 }
 
 /**
- * Which driver this environment asks for. Netlify sets NETLIFY in every function
- * build and invoke; VD_STORE lets a deploy pin or override the choice, and the
- * tests force 'fs'.
+ * Which driver this environment asks for. VD_STORE lets a deploy pin or override the
+ * choice, and the tests force 'fs'. On the platform the two signals are the NETLIFY flag
+ * and a blobs context that has already been adopted from the invoke event - a function
+ * runtime is free to deliver one and not the other.
  */
 export function selectDriver(env = process.env) {
   const forced = typeof env.VD_STORE === 'string' ? env.VD_STORE : '';
@@ -63,7 +64,7 @@ export function selectDriver(env = process.env) {
   if (forced === 'blobs') {
     return 'blobs';
   }
-  return env.NETLIFY !== undefined ? 'blobs' : 'fs';
+  return env.NETLIFY !== undefined || globalThis.netlifyBlobsContext !== undefined ? 'blobs' : 'fs';
 }
 
 /**
@@ -91,10 +92,43 @@ function toBuffer(value) {
 }
 
 /**
- * Opens one namespace. Never throws at import time and never throws when the
- * blobs driver cannot be used: an uninstalled package, a missing store or a
- * dead network falls back to the filesystem, because failing the request would
- * turn a storage hiccup into a site outage.
+ * The blobs client takes its credentials from `NETLIFY_BLOBS_CONTEXT`, which the
+ * platform does not always hand a function at invoke time - it can also deliver them
+ * on the event, base64 in `event.blobs` with the site id in the event headers. The
+ * sdk turns that into the same global with connectLambda(), so the adapter calls this
+ * with its context before it asks for a store. Without it a deploy on the platform
+ * finds no credentials anywhere and the store cannot be reached.
+ *
+ * Silent by design: no event, no sdk or a context that will not parse leaves the
+ * environment alone, and the next openKv() reports what actually went wrong.
+ */
+export async function adoptBlobsContext(context, loadSdk = () => import('@netlify/blobs')) {
+  const event = context?.event;
+  if (!event || typeof event.blobs !== 'string' || event.blobs === '') {
+    return false;
+  }
+  try {
+    const mod = await loadSdk();
+    const connect = mod.connectLambda ?? (mod.default && mod.default.connectLambda);
+    if (typeof connect !== 'function') {
+      return false;
+    }
+    connect(event);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Opens one namespace. Never throws at import time.
+ *
+ * When the blobs driver cannot be used, the fallback is the filesystem - but only
+ * where the filesystem can actually be written. On Netlify a function's own directory
+ * is read-only, so a silent fallback there produces a site that renders and then
+ * fails every analyse with an opaque write error; that is worse than one clear
+ * failure, so the fallback is checked and a StorageUnavailable names the real reason
+ * when it will not work. The reason is also kept in storageFault() for /health.
  *
  * @param {string} namespace 'jobs' | 'builds' | 'files' | 'rate' | ...
  * @param {{driver?: string, root?: string, env?: object, warn?: (m: string) => void}} [opts]
@@ -109,12 +143,60 @@ export async function openKv(namespace, opts = {}) {
   if (driver === 'blobs') {
     try {
       return await makeBlobsKv(namespace, env);
-
     } catch (err) {
-      warn(`kv: blobs driver unavailable for "${namespace}" (${err && err.message ? err.message : err}); using the filesystem`);
+      const message = err && err.message ? err.message : String(err);
+      warn(`kv: blobs driver unavailable for "${namespace}" (${message}); using the filesystem`);
+      if (await fsWritable(root)) {
+        storageFaults.set(namespace, message);
+      } else {
+        // Both halves are missing, which is the state worth naming: the reason the
+        // platform store failed, and the reason the fallback cannot take its place.
+        const why = 'netlify blobs is not usable here (' + message + ') and the function '
+          + 'filesystem is read-only, so nothing can be stored. See the Netlify Blobs step in README.md.';
+        storageFaults.set(namespace, why);
+        throw new StorageUnavailable(why);
+      }
     }
   }
   return makeFsKv(namespace, root);
+}
+
+/**
+ * The last blobs failure per namespace, or null while none has happened. /health
+ * reads it: on a platform deploy this is the difference between 'the store works' and
+ * 'the site is falling back to a filesystem it cannot write'.
+ */
+const storageFaults = new Map();
+
+export function storageFault() {
+  return storageFaults.size === 0 ? null : Object.fromEntries(storageFaults);
+}
+
+/** A store this deployment cannot use at all. */
+export class StorageUnavailable extends Error {}
+
+/** Whether the namespace root can be created and written, asked once per root. */
+const writableCache = new Map();
+
+async function fsWritable(root) {
+  const cached = writableCache.get(root);
+  if (cached !== undefined) {
+    return cached;
+  }
+  let ok = false;
+  try {
+    const dir = path.join(root, '.probe');
+    await fsp.mkdir(dir, { recursive: true });
+    const probe = path.join(dir, 'writable');
+    await fsp.writeFile(probe, 'ok');
+    await fsp.rm(probe, { force: true });
+    await fsp.rm(dir, { recursive: true, force: true });
+    ok = true;
+  } catch {
+    ok = false;
+  }
+  writableCache.set(root, ok);
+  return ok;
 }
 
 /* ------------------------------------------------------------------ filesystem */
@@ -313,8 +395,15 @@ async function makeBlobsKv(namespace, env, loadSdk = () => import('@netlify/blob
   if (typeof getStore !== 'function') {
     throw new Error('@netlify/blobs exposes no getStore');
   }
-  // getStore() picks up SITE_ID / token from the runtime environment itself.
-  const store = getStore({ name: safeNamespace(namespace) });
+  // getStore() picks up SITE_ID / token from the runtime environment itself, from the
+  // context adoptBlobsContext() put there, or from the two variables an operator sets
+  // when the platform has not handed the function any credentials of its own.
+  const siteID = typeof env.BLOBS_SITE_ID === 'string' ? env.BLOBS_SITE_ID : '';
+  const token = typeof env.BLOBS_TOKEN === 'string' ? env.BLOBS_TOKEN : '';
+  const name = safeNamespace(namespace);
+  const store = siteID !== '' && token !== ''
+    ? getStore({ name, siteID, token })
+    : getStore({ name });
 
   const metaOf = (m) => (m && typeof m === 'object' && !Array.isArray(m) ? m : null);
   const seconds = (v) => {

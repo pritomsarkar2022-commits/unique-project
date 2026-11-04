@@ -56,6 +56,9 @@ export const config = {
     // memory limit and stays at 0 = unlimited, because nothing about the php app read
     // it; this one is enforced by Relay.
     function_stream_bytes: 18874368,
+    // The size a route may answer with as one buffered body. Above it the bytes go out
+    // as a stream instead, which the platform allows up to the ceiling above.
+    function_buffer_bytes: 6291456,
   },
 
   hls: {

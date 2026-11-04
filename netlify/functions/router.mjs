@@ -11,8 +11,19 @@ import { Readable } from 'node:stream';
 
 import { buildContext } from '../../site/src/http/request.mjs';
 import { handle } from '../../site/src/http/router.mjs';
+import { adoptBlobsContext } from '../../site/src/storage/kv.mjs';
+
+// Nothing but a Netlify deploy imports this file, and the storage layer asks the
+// environment which platform it is on. The runtime's own NETLIFY flag is documented for
+// the build, not for an invoke, so a deploy that should have used Blobs answered that it
+// was on a plain filesystem and fell back to a directory it cannot write.
+process.env.NETLIFY = process.env.NETLIFY ?? '1';
 
 export default async function router(request, context) {
+  // The store credentials a function gets can ride on the event rather than the
+  // environment, and the blobs client only looks at the event when it is told to.
+  await adoptBlobsContext(context);
+
   const incoming = new URL(request.url);
   const method = String(request.method ?? 'GET').toUpperCase();
   const body = method === 'GET' || method === 'HEAD' ? null : Buffer.from(await request.arrayBuffer());
@@ -29,11 +40,33 @@ export default async function router(request, context) {
     url: path + incoming.search,
     headers: request.headers,
     body,
-    ip: context?.requestContext?.ip ?? '',
+    ip: clientIp(request, context),
     entry: '/index.php',
   });
 
   return toResponse(await handle(ctx));
+}
+
+/**
+ * The key the rate limiter buckets a visitor under. Netlify has moved this between
+ * `context.ip` and `context.requestContext.ip` across runtimes, but the edge always
+ * sets the header, so the header leads and the two context shapes follow. An empty
+ * answer would put every visitor into one shared bucket, so it is never worth
+ * guessing at: a throttle that fires for nobody is better than one that fires for
+ * everyone.
+ */
+function clientIp(request, context) {
+  const fromHeader = request.headers.get('x-nf-client-connection-ip');
+  if (typeof fromHeader === 'string' && fromHeader !== '') {
+    return fromHeader;
+  }
+  const fromContext = context?.ip ?? context?.requestContext?.ip;
+  if (typeof fromContext === 'string' && fromContext !== '') {
+    return fromContext;
+  }
+  const forwarded = request.headers.get('x-forwarded-for');
+  const first = typeof forwarded === 'string' ? forwarded.split(',')[0].trim() : '';
+  return first;
 }
 
 function toResponse(res) {
@@ -74,6 +107,7 @@ function statusText(status) {
     429: 'Too Many Requests',
     500: 'Internal Server Error',
     502: 'Bad Gateway',
+    503: 'Service Unavailable',
   };
   return names[status] ?? '';
 }

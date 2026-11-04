@@ -777,3 +777,79 @@ test('the netlify adapter turns a Request into the php context and back', async 
   assert.equal(form.statusText, 'Unprocessable Content');
   assert.deepEqual(await form.json(), { ok: false, error: 'Paste a video link first.', hint: '', code: 'empty' });
 });
+
+/* ------------------------------------------------------------------ the deploy's own questions */
+
+test('/health answers what a bundle can silently lose', async () => {
+  const http = stubHttp(() => res(200, 'hello'));
+  const r = await handle(get('/health'), { http });
+  assert.equal(r.status, 200);
+  const body = JSON.parse(r.body);
+  assert.equal(body.storage_writable, true, 'the store the router was configured with takes a write');
+  assert.equal(body.storage_reason, null, 'and nothing fell over on the way there');
+  assert.equal(body.extractors, 13, 'every extractor in HOST_EXTRACTORS is registered');
+  assert.ok(body.hosts >= 40, 'and they answer for more than forty hosts');
+  assert.equal(body.outbound, 'ok');
+
+  const bare = await handle(get('/health'), { http });
+  assert.equal(JSON.parse(bare.body).app, 'video-downloader',
+    'the netlify.toml proxy sends a visitor to /health, not to /health/something');
+});
+
+test('a file answer above the buffered ceiling leaves as a stream', async () => {
+  const original = config.limits.function_buffer_bytes;
+  config.limits.function_buffer_bytes = 4;
+  try {
+    const { store, rec, sig, body } = await readyFile();
+    const r = await handle(get(fileQuery(rec, sig)), { builds: store });
+    assert.equal(r.status, 200);
+    assert.equal(r.body, null, 'the bytes are not held in the body');
+    assert.ok(r.stream !== null, 'they go out as a stream, which is the only way a platform '
+      + 'with a six megabyte buffer hands over a bigger file');
+    assert.deepEqual([...await drain(r.stream)], [...body], 'and they are the same bytes');
+    assert.equal(r.getHeader('content-length'), '10');
+  } finally {
+    config.limits.function_buffer_bytes = original;
+  }
+
+  const { store, rec, sig, body } = await readyFile();
+  const small = await handle(get(fileQuery(rec, sig)), { builds: store });
+  assert.deepEqual([...small.body], [...body], 'at the default ceiling a ten byte file is a body again');
+  assert.equal(small.stream, null);
+});
+
+test('a deploy with no store says so instead of failing every write', async () => {
+  // The state a netlify function is in when it has no blob credentials and a directory
+  // it cannot write to. The two halves of that are each survivable on their own; the
+  // pair is not, and a visitor needs to be told that rather than handed a 500.
+  const file = path.join(ROOT, 'not-a-directory');
+  fs.writeFileSync(file, 'x');
+  const warned = [];
+  const realWarn = console.warn;
+  console.warn = (m) => warned.push(m);
+  const stored = { VD_STORE: process.env.VD_STORE, VD_STORAGE_DIR: process.env.VD_STORAGE_DIR };
+  process.env.VD_STORE = 'blobs';
+  process.env.VD_STORAGE_DIR = path.join(file, 'storage');
+  try {
+    const r = await handle(post('/index.php?r=build', { job: 'deadbeefdeadbeefdead' }));
+    assert.equal(r.status, 503);
+    const body = JSON.parse(r.body);
+    assert.equal(body.code, 'storage');
+    assert.match(body.error, /store/i);
+
+    // The same state read from the operator's page, because that is where the reason
+    // gets looked for. Once the platform hands out credentials the fallback is not
+    // needed, but until then /health is the only place that says which half is missing.
+    const faulted = JSON.parse((await handle(get('/health'), { http: stubHttp(() => res(200, '')) })).body);
+    assert.equal(faulted.storage_writable, false);
+    assert.ok(typeof faulted.storage_reason === 'object' && faulted.storage_reason !== null,
+      'and it names the namespaces that could not be opened');
+    assert.match(Object.values(faulted.storage_reason).join(' '), /read-only/,
+      'with the reason the platform store failed and why the fallback will not do');
+  } finally {
+    process.env.VD_STORE = stored.VD_STORE;
+    process.env.VD_STORAGE_DIR = stored.VD_STORAGE_DIR;
+    console.warn = realWarn;
+    assert.ok(warned.length > 0, 'the fallback attempt is still logged');
+  }
+});
