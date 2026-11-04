@@ -66,6 +66,25 @@ export class BaseExtractor {
   }
 
   /**
+   * The page that holds this embed, when the pasted address names one. The Analyzer
+   * calls this before extract(); nothing else does, so an ordinary link is unaffected.
+   * @see ./embedReferrer.mjs
+   */
+  setEmbedReferrer(url) {
+    this.embedReferrer = String(url ?? '');
+    return this;
+  }
+
+  /**
+   * Headers for reading the pasted page: the parent site when there is one, since a
+   * host that gates its embeds checks the Referer against its list of allowed pages
+   * and the embed address alone reads as a visitor from nowhere.
+   */
+  pageHeaders(pageUrl) {
+    return { Referer: this.embedReferrer !== undefined && this.embedReferrer !== '' ? this.embedReferrer : pageUrl };
+  }
+
+  /**
    * @param {string[]} visited guards against redirect loops between players
    * @returns {Promise<MediaBundle>}
    */

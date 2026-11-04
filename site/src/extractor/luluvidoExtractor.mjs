@@ -1,5 +1,5 @@
 import { urlAbsolutize } from '../support.mjs';
-import { ExtractException } from '../errors.mjs';
+import { ExtractException, HttpException } from '../errors.mjs';
 import { Source } from './source.mjs';
 import { BaseExtractor } from './baseExtractor.mjs';
 import { JsUnpacker } from './jsUnpacker.mjs';
@@ -34,17 +34,34 @@ export class LuluvidoExtractor extends BaseExtractor {
 
   async extract(pageUrl, http, visited = []) { // eslint-disable-line no-unused-vars
     const b = this.newBundle(pageUrl, 'luluvido');
-    const res = await http.get(pageUrl, { headers: { Referer: pageUrl } });
+    const res = await http.get(pageUrl, { headers: this.pageHeaders(pageUrl) });
     this.fillMeta(b, res);
     if (!res.ok()) {
       throw new ExtractException('That Luluvido page returned HTTP ' + res.status + '.', 'The video is likely removed.', 'http_' + res.status);
     }
 
-    const flat = JsUnpacker.joinConcatenations(JsUnpacker.unescape(JsUnpacker.unpack(res.body)));
-
+    let flat = JsUnpacker.joinConcatenations(JsUnpacker.unescape(JsUnpacker.unpack(res.body)));
     let urls = matchAllGroup(new RegExp('file[' + S + '*:[' + S + ']*' + QUOTE + '(https?://' + NOTQ + '+\\.m3u8\\?' + NOTQ + '+)' + QUOTE, 'i'), flat, 1);
     if (urls.length === 0) {
       urls = MediaSniffer.mediaUrls(flat).filter((u) => u.includes('.m3u8'));
+    }
+    if (urls.length === 0) {
+      // A shared link is sometimes only a frame around the player page, and the
+      // packed config is in that document. One hop, then give up.
+      const frame = await this.embedFrame(res, http, visited);
+      if (frame !== null) {
+        flat = JsUnpacker.joinConcatenations(JsUnpacker.unescape(JsUnpacker.unpack(frame.body)));
+        urls = matchAllGroup(new RegExp('file[' + S + '*:[' + S + ']*' + QUOTE + '(https?://' + NOTQ + '+\\.m3u8\\?' + NOTQ + '+)' + QUOTE, 'i'), flat, 1);
+        if (urls.length === 0) {
+          urls = MediaSniffer.mediaUrls(flat).filter((u) => u.includes('.m3u8'));
+        }
+        if (urls.length > 0) {
+          b.finalUrl = frame.finalUrl;
+          const meta = MediaSniffer.meta(frame.body, frame.finalUrl);
+          b.title ??= meta.title;
+          b.thumbnail ??= meta.thumbnail;
+        }
+      }
     }
     if (urls.length === 0) {
       throw new ExtractException('The player on that page never revealed a stream.', 'Their packing changed, or the video needs their app.', 'no_media');
@@ -74,6 +91,36 @@ export class LuluvidoExtractor extends BaseExtractor {
     }
     b.confidence = 0.9;
     return b;
+  }
+
+  /**
+   * Open the player document this page frames, when it frames one. Their embed pages
+   * are at /e/<code> on the same site, so this stays inside the host the visitor
+   * named and asks for one extra document, not a walk.
+   *
+   * @returns {Promise<import('../net/httpResponse.mjs').HttpResponse|null>}
+   */
+  async embedFrame(res, http, visited) {
+    const seen = new Set([res.finalUrl, ...visited.map(String)]);
+    for (const frame of MediaSniffer.playerPages(res.body, res.finalUrl).slice(0, 3)) {
+      if (seen.has(frame)) {
+        continue;
+      }
+      seen.add(frame);
+      let inner;
+      try {
+        inner = await http.get(frame, { headers: { Referer: res.finalUrl } });
+      } catch (e) {
+        if (e instanceof HttpException || String(e && e.name) === 'HttpException') {
+          continue;
+        }
+        throw e;
+      }
+      if (inner.ok() && inner.isHtml()) {
+        return inner;
+      }
+    }
+    return null;
   }
 }
 

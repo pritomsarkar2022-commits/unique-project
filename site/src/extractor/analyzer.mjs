@@ -3,6 +3,7 @@ import { parseUrl, phpTrim } from '../support.mjs';
 import { ExtractException } from '../errors.mjs';
 import { assertSafeAsync } from '../net/urlGuard.mjs';
 import { relayLink } from '../net/relay.mjs';
+import { embedReferrerOf } from './embedReferrer.mjs';
 import { Source } from './source.mjs';
 
 /**
@@ -188,6 +189,12 @@ export class Analyzer {
    * @returns {Promise<import('./mediaBundle.mjs').MediaBundle>}
    */
   static async runExtractor(extractor, pageUrl, http, registry) { // eslint-disable-line no-unused-vars
+    // A pasted embed often names the page that holds it, and a host that gates its
+    // embeds reads that as the Referer. See embedReferrer.mjs.
+    const parent = embedReferrerOf(pageUrl);
+    if (parent !== null) {
+      extractor.setEmbedReferrer(parent);
+    }
     let bundle;
     try {
       bundle = await extractor.extract(pageUrl, http);
@@ -201,7 +208,11 @@ export class Analyzer {
         throw e;
       }
       vdLog('host extractor failed, retrying generic', { host: extractor.name(), error: e.message });
-      bundle = await new GenericExtractor().extract(pageUrl, http);
+      const retry = new GenericExtractor();
+      if (parent !== null) {
+        retry.setEmbedReferrer(parent);
+      }
+      bundle = await retry.extract(pageUrl, http);
     }
     bundle.provider = extractor.name() !== 'generic'
       ? extractor.name()

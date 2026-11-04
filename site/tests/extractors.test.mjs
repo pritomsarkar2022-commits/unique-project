@@ -33,6 +33,15 @@ class FakeHttp {
 
   async get(url, opts = {}) {
     this.calls.push({ url, opts });
+    return this.#answer(url);
+  }
+
+  async post(url, body, opts = {}) {
+    this.calls.push({ url, opts, post: body });
+    return this.#answer(url);
+  }
+
+  #answer(url) {
     const queue = this.replies[url];
     const reply = Array.isArray(queue) && queue.length > 0 ? queue.shift() : undefined;
     if (reply === undefined) {

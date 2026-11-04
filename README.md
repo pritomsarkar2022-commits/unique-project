@@ -65,7 +65,7 @@ one request per file.
 
 ```
 npm run build      # site/public from site/templates + site/assets
-npm test           # 112 unit and route tests, node >= 22
+npm test           # 121 unit and route tests, node >= 22
 npm run parity     # differential tests; needs a php binary, see PHP_BIN below
 npm run deploy-sim # bundles the function the way netlify does, then runs it
 node scripts/serve.mjs 8099   # the whole site locally, router included
@@ -104,7 +104,7 @@ all of it as json:
 | `storage_writable` | `true` — the probe key was written, read back and deleted |
 | `storage_reason` | `null`; otherwise the namespaces that failed, with the platform's own message |
 | `extractors` | `13` — every module `HOST_EXTRACTORS` names |
-| `hosts` | `44` — the hosts the homepage advertises |
+| `hosts` | `46` — the hosts the homepage advertises |
 
 If `extractors` is below 13 the bundle lost an extractor, and `npm run deploy-sim` reproduces
 it without a deploy. If `storage_writable` is false, the analyse route answers `503` with
@@ -134,7 +134,7 @@ it on disk:
 git clone https://github.com/pritomsarkar2022-commits/downloader-website-.git source
 ```
 
-## Two things the port does differently, on purpose
+## Three things the port does differently, on purpose
 
 1. **Storage.** The php app kept flat files under `storage/`. Here the same records go
    through `site/src/storage/kv.mjs`, which is the filesystem on a machine that has one
@@ -165,6 +165,21 @@ git clone https://github.com/pritomsarkar2022-commits/downloader-website-.git so
    is what `emit()` does for any buffer without a PES header, and finishes the file.
    The differential harness reports the cuts where php dies instead of comparing them
    (`PHP_RESUME_CRASH` in `parity/test-engine.mjs`).
+3. **Two readers go one step further than php did.** Both were added after a live host
+   moved its stream out of the page markup, and each asks only for what a visitor's own
+   browser already asks for:
+   - `StreamfileExtractor::playScript()` posts `op=play&file_code=…` to the host's own
+     `/dl` endpoint — the request the play button makes — and reads the playlist out of
+     the packed script in the reply. The php reader stopped at the page markup, where
+     that host no longer writes it.
+   - `embedReferrerOf()` reads the parent page out of the pasted link (`parent_ref`,
+     `ref`, `referer`, …) and uses it as the `Referer` of the request for the embed,
+     which is what the embedding browser sends and what a host that gates its embeds
+     checks. An address that is not http(s), or that carries credentials, is refused
+     rather than used, and a link naming no parent behaves exactly as it did before.
+
+   Neither of them goes around a browser check. A host that answers Cloudflare's
+   challenge to this server is reported as `gated`, and always will be.
 
 ## Cost, if you are on a free host
 
