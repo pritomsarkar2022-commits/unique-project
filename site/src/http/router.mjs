@@ -9,6 +9,7 @@
  */
 
 import crypto from 'node:crypto';
+import { Readable } from 'node:stream';
 
 import { cfg } from '../config.mjs';
 import { VD_VERSION, baseHref, e, linkOpen, phpTrim, setRequestHost, siteUrl } from '../support.mjs';
@@ -21,7 +22,7 @@ import { JobStore } from '../job/jobStore.mjs';
 import { HttpClient } from '../net/httpClient.mjs';
 import { relayRun } from '../net/relayRun.mjs';
 import { Throttle } from '../net/throttle.mjs';
-import { openKv } from '../storage/kv.mjs';
+import { openKv, storageFault, StorageUnavailable } from '../storage/kv.mjs';
 import { UrlGuardException } from '../net/urlGuard.mjs';
 import { renderError } from '../views/error.mjs';
 import { renderHome } from '../views/home.mjs';
@@ -61,6 +62,11 @@ export async function handle(ctx, deps = {}) {
       route = 'robots';
     } else if (/^\/sitemap\.xml$/i.test(path)) {
       route = 'sitemap';
+    } else if (/^\/(health|relay)\/?$/i.test(path)) {
+      // The two bare paths netlify.toml proxies here. php only ever had them behind
+      // the script as index.php/health, which is the PATH_INFO route above; a platform
+      // that hands over the path itself still has to answer the same switch.
+      route = path.slice(1).replace(/\/$/, '').toLowerCase();
     }
   }
 
@@ -83,7 +89,7 @@ export async function handle(ctx, deps = {}) {
         res = await handleRelay(ctx, deps);
         break;
       case 'health':
-        res = await handleHealth();
+        res = await handleHealth(deps);
         break;
       case 'robots':
         res = handleRobots();
@@ -129,6 +135,18 @@ function failure(route, err) {
       hint: 'The video host is blocking our server or is down. A minute of waiting usually fixes it.',
       code: 'network',
     }, 502);
+  }
+  if (err instanceof StorageUnavailable) {
+    // The one failure that is the deployment's, not the visitor's: say which store is
+    // missing instead of letting an EROFS look like a broken video page.
+    vdLog('storage unavailable', { msg: err.message });
+    return jsonOut({
+      ok: false,
+      error: 'This site cannot store a request yet.',
+      hint: 'The video host needs a durable store to remember your link. On Netlify that is Blobs - '
+        + 'see the storage step in README.md.',
+      code: 'storage',
+    }, 503);
   }
   vdLog('unhandled', { msg: err && err.message, stack: err && err.stack });
   if (/^(api|analyze|relay|build|progress|file|health|json)/.test(route)) {
@@ -300,7 +318,16 @@ async function handleFile(ctx, deps) {
     return textOut('That file is not ready yet.', 409);
   }
 
-  const out = new VdResponse(wanted === null ? 200 : 206, {}, piece.data);
+  const out = new VdResponse(wanted === null ? 200 : 206);
+  // A function may hold a response under about six megabytes in memory and hand a much
+  // larger one over as a stream. The bytes are the same either way, but a buffered
+  // answer over the ceiling is refused by the platform, so the big ones stream.
+  const bufferCap = Math.trunc(Number(cfg('limits.function_buffer_bytes', 6291456)));
+  if (bufferCap > 0 && piece.data.length > bufferCap) {
+    out.stream = Readable.from(piece.data);
+  } else {
+    out.body = piece.data;
+  }
   out.header('Content-Type', 'video/mp4');
   out.header('Accept-Ranges', 'bytes');
   out.header('Content-Length', String(piece.data.length));
@@ -393,7 +420,7 @@ function handleSitemap() {
  * runtime: can it seal a link, can it write to the store it was configured with, and
  * can it reach a file host at all.
  */
-async function handleHealth() {
+async function handleHealth(deps = {}) {
   let storage = 'unwritable';
   let driver = 'unknown';
   try {
@@ -408,9 +435,26 @@ async function handleHealth() {
     vdLog('health storage probe failed', { msg: err && err.message });
   }
 
+  // The two things that silently break a deploy: a store the platform will not hand
+  // out, and an extractor list a bundler emptied. Both answers are worth more in the
+  // response than in the log, because the log is only read after someone is upset.
+  const faults = storageFault();
+  let extractors = -1;
+  let hosts = -1;
+  try {
+    const registry = await ExtractorRegistry.create();
+    extractors = registry.extractors.length;
+    hosts = Object.keys(await registry.knownHosts()).length;
+    if (registry.missingModules.length > 0) {
+      vdLog('extractor modules missing', { list: registry.missingModules.join(',') });
+    }
+  } catch (err) {
+    vdLog('extractor registry failed', { msg: err && err.message });
+  }
+
   let outbound = 'unchecked';
   try {
-    const res = await new HttpClient(1).get('https://example.com/', { max_bytes: 4096, timeout: 8 });
+    const res = await (deps.http ?? new HttpClient(1)).get('https://example.com/', { max_bytes: 4096, timeout: 8 });
     outbound = res.status >= 200 && res.status < 500 ? 'ok' : 'blocked';
   } catch (err) {
     outbound = 'blocked: ' + (err && err.message ? err.message : String(err));
@@ -424,6 +468,9 @@ async function handleHealth() {
     aes: hasAes(),
     storage_driver: driver,
     storage_writable: storage === 'writable',
+    storage_reason: faults === null ? null : faults,
+    extractors,
+    hosts,
     outbound,
   });
 }

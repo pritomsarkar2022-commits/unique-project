@@ -65,8 +65,9 @@ one request per file.
 
 ```
 npm run build      # site/public from site/templates + site/assets
-npm test           # 104 unit and route tests, node >= 22
+npm test           # 112 unit and route tests, node >= 22
 npm run parity     # differential tests; needs a php binary, see PHP_BIN below
+npm run deploy-sim # bundles the function the way netlify does, then runs it
 node scripts/serve.mjs 8099   # the whole site locally, router included
 ```
 
@@ -82,6 +83,49 @@ and through the port, and compares the output. Every check must report zero dive
 ```
 PHP_BIN=/path/to/php npm run parity     # php >= 8.1, used only by the tests
 ```
+
+`npm run deploy-sim` is the check that the tests cannot be: netlify builds a function with
+esbuild, which turns the whole import graph into **one file** and only follows a dynamic
+`import()` it can read as a string. A source tree passes every test while a bundle silently
+loses whatever it could not trace. The script bundles `netlify/functions/router.mjs` with the
+same flags `netlify.toml` implies, runs that artifact in isolation, and asks the questions a
+broken bundle answers differently — is the extractor list full, do the routes still answer,
+and does a missing store say so. It needs no network, no php and no blob store.
+
+## Storage on a deploy: read `/health` first
+
+A function has one durable store, and this app uses it for the job records, the build
+records, the finished mp4s and the rate-limit buckets. `GET /health` reports the state of
+all of it as json:
+
+| field | what a good value looks like |
+| --- | --- |
+| `storage_driver` | `blobs` on netlify, `fs` on a machine with a disk |
+| `storage_writable` | `true` — the probe key was written, read back and deleted |
+| `storage_reason` | `null`; otherwise the namespaces that failed, with the platform's own message |
+| `extractors` | `13` — every module `HOST_EXTRACTORS` names |
+| `hosts` | `44` — the hosts the homepage advertises |
+
+If `extractors` is below 13 the bundle lost an extractor, and `npm run deploy-sim` reproduces
+it without a deploy. If `storage_writable` is false, the analyse route answers `503` with
+`code: "storage"` rather than pretending the video page is broken.
+
+The blobs client finds its credentials from the platform, and on the older function runtimes
+from the invoke event, which `netlify/functions/router.mjs` hands to
+`adoptBlobsContext()` before it asks for a store. If `/health` still reports that the
+environment was not configured for Blobs, give the client the two values itself, in the
+site's environment variables (Netlify dashboard → Site configuration → Environment variables,
+then redeploy):
+
+```
+BLOBS_SITE_ID  <the id on the site's General information page>
+BLOBS_TOKEN    <a personal access token with "Config files and deploy hooks" write>
+```
+
+`getStore()` prefers whatever the platform injected and uses these only when there is none,
+so a site that later starts receiving the context needs no change. Blobs is a paid-metered
+product on the free plan; the store itself is created on the first write, so there is nothing
+to provision in advance.
 
 `source/` is not in this repo. The oracle is the original app, so the parity run needs
 it on disk:

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { openKv, atomicPutGuardAvailable, selectDriver, __testing } from '../src/storage/kv.mjs';
+import { openKv, atomicPutGuardAvailable, selectDriver, storageFault, adoptBlobsContext, StorageUnavailable, __testing } from '../src/storage/kv.mjs';
 import { JobStore } from '../src/job/jobStore.mjs';
 import { BuildStore } from '../src/build/buildStore.mjs';
 import { Throttle, bucketDecision, validateIp, bucketKey } from '../src/net/throttle.mjs';
@@ -172,6 +172,68 @@ test('a blobs environment without the package still gets a working store', async
   assert.equal(selectDriver({ VD_STORE: 'blobs' }), 'blobs');
   assert.equal(atomicPutGuardAvailable({ NETLIFY: '1' }), true);
   assert.equal(atomicPutGuardAvailable({}), false);
+});
+
+test('a blobs environment with an unwritable filesystem refuses the fallback', async (t) => {
+  // A function's own directory is read-only, so falling back to it does not give a
+  // store: it gives a site that renders and then fails every write with an EROFS that
+  // looks like a broken video page. The name has to say which half is missing.
+  const block = path.join(tempRoot(t), 'unusable');
+  fs.writeFileSync(block, 'a file where a directory should be');
+  const root = path.join(block, 'storage');
+  const warnings = [];
+  await assert.rejects(
+    openKv('jobs', { driver: 'blobs', root, env: {}, warn: (m) => warnings.push(m) }),
+    (err) => {
+      assert.ok(err instanceof StorageUnavailable, 'the storage error type, not a bare EROFS');
+      assert.match(err.message, /blobs is not usable here/);
+      assert.match(err.message, /read-only/, 'and the reason the fallback will not do');
+      return true;
+    },
+  );
+  assert.equal(warnings.length, 1, 'the fallback attempt is still logged');
+  const faults = storageFault();
+  assert.ok(faults !== null && typeof faults.jobs === 'string', '/health can read the same reason back');
+});
+
+test('a writable filesystem still falls back', async (t) => {
+  // Off the platform this is the normal state: no blobs, a disk that works.
+  const kv = await openKv('jobs', { driver: 'blobs', root: tempRoot(t), env: {}, warn: () => {} });
+  assert.equal(kv.driver, 'fs');
+});
+
+test('adoptBlobsContext hands the invoke event to the sdk', async () => {
+  const seen = [];
+  const sdk = async () => ({ connectLambda: (event) => seen.push(event) });
+  const event = { blobs: 'eyJ1cmwiOiJodHRwczovL2Jsb2JzLmV4YW1wbGUifQ==', headers: { 'x-nf-site-id': 'abc' } };
+  assert.equal(await adoptBlobsContext({ event }, sdk), true, 'the credentials on the event are adopted');
+  assert.deepEqual(seen, [event]);
+  assert.equal(await adoptBlobsContext({}, sdk), false, 'an event with no blobs is left to the environment');
+  assert.equal(await adoptBlobsContext({ event: { headers: {} } }, sdk), false);
+  assert.equal(await adoptBlobsContext({ event }, async () => { throw new Error('no sdk'); }), false,
+    'and a missing sdk is not this function\'s problem to raise');
+});
+
+test('an adopted blobs context selects the blobs driver', () => {
+  // A function runtime can deliver the event credentials and no NETLIFY flag at all,
+  // which is how a deploy ends up on the filesystem it cannot write.
+  const key = 'netlifyBlobsContext';
+  assert.equal(selectDriver({}), 'fs');
+  globalThis[key] = { siteID: 'site-1', token: 'token-1' };
+  try {
+    assert.equal(selectDriver({}), 'blobs');
+    assert.equal(selectDriver({ VD_STORE: 'fs' }), 'fs', 'an operator can still pin the driver');
+  } finally {
+    delete globalThis[key];
+  }
+});
+
+test('explicit store credentials reach getStore when the platform gives none', async () => {
+  const asked = [];
+  const store = fakeBlobsStore();
+  await __testing.makeBlobsKv('files', { BLOBS_SITE_ID: 'site-9', BLOBS_TOKEN: 'tok-9' },
+    async () => ({ getStore: (options) => { asked.push(options); return store; } }));
+  assert.deepEqual(asked[0], { name: 'files', siteID: 'site-9', token: 'tok-9' });
 });
 
 /* ------------------------------------------------------------------ blobs driver */
