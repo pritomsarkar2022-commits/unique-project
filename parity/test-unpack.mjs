@@ -6,6 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { oracleRun, phpAvailable, Diff, makeRng } from './harness.mjs';
 import { JsUnpacker, stripcslashes } from '../site/src/extractor/jsUnpacker.mjs';
 import { CertChain, validatesUrl } from '../site/src/net/certChain.mjs';
+import { ipv4IsPrivate, ipv4ToLong } from '../site/src/net/urlGuard.mjs';
 
 /**
  * Differential suite for the two modules this port owns: the packer reader
@@ -864,6 +865,61 @@ const phpUris = (php) => php.res.map((b) => Buffer.from(b, 'base64').toString('l
   }));
 }
 
+// ---------------------------------------------------------- UrlGuard::isPrivateHost
+{
+  // php blocks exactly 0/8, 10/8, 127/8, 169.254/16, 172.16/12, 192.168/16 and
+  // 240/4. The port blocks those plus the other spaces an address can only be in if
+  // it is not a public site: 100.64/10 (carrier-grade nat), 192.0.0/24, 192.0.2/24,
+  // 192.88.99/24 (6to4 relay), 198.18/15 (benchmarking), 198.51.100/24 and
+  // 203.0.113/24 (documentation) and 224/4 (multicast). A probe therefore has to
+  // agree with php in one direction and fall inside that extra set in the other,
+  // which is what catches an over-wide mask such as 192.0.0.0/8: it swallows every
+  // 192.x address, google's 192.178.183.207 among them.
+  const extras = [[0x64400000, 0xffc00000], [0xc0000000, 0xffffff00], [0xc0000200, 0xffffff00],
+    [0xc0586300, 0xffffff00], [0xc6120000, 0xfffe0000], [0xc6336400, 0xffffff00],
+    [0xcb006400, 0xffffff00], [0xe0000000, 0xf0000000]];
+  const inExtras = (ip) => {
+    const v = ipv4ToLong(ip);
+    return extras.some(([base, mask]) => (v & mask) >>> 0 === (base & mask) >>> 0);
+  };
+  const edges = [];
+  for (const [base, mask] of [...extras, [0x00000000, 0xff000000], [0x0a000000, 0xff000000],
+    [0x7f000000, 0xff000000], [0xa9fe0000, 0xffff0000], [0xac100000, 0xfff00000],
+    [0xc0a80000, 0xffff0000], [0xf0000000, 0xf0000000]]) {
+    const step = ~mask >>> 0;
+    for (const off of [0, 1, step, step - 1]) {
+      const value = (base + off) >>> 0;
+      edges.push([value >>> 24, (value >>> 16) & 255, (value >>> 8) & 255, value & 255].join('.'));
+    }
+  }
+  // Real allocations a video host actually lives on, the class the over-wide mask ate.
+  const publicOnes = ['1.1.1.1', '8.8.8.8', '13.107.42.12', '23.67.14.108', '52.84.1.1', '54.239.28.1',
+    '104.16.0.1', '142.251.14.207', '151.101.1.69', '172.67.1.1', '192.0.1.255', '192.0.3.1',
+    '192.1.1.1', '192.88.98.255', '192.88.100.1', '192.169.1.1', '192.178.183.207', '193.0.0.1',
+    '198.17.255.255', '198.20.0.1', '199.5.6.7', '203.0.112.255', '203.0.114.1', '208.80.154.224',
+    '216.58.200.33', '223.255.255.255'];
+  const rng = makeRng(70707);
+  const randomOnes = [];
+  for (let i = 0; i < 400; i++) {
+    randomOnes.push([rng.int(1, 223), rng.int(0, 255), rng.int(0, 255), rng.int(1, 254)].join('.'));
+  }
+  const list = [...new Set([...edges, ...publicOnes, ...randomOnes])];
+  list.forEach((ip, i) => probe('pr|' + i, 'private_ip', [ip], (js, php) => {
+    if (!php.ok) {
+      return d.ok('private_ip ' + i + ' refused outright by php', php.err !== null, php.err);
+    }
+    const mine = ipv4IsPrivate(ip);
+    if (php.res.blocked) {
+      return d.same(`filter_var(NO_PRIV|NO_RES) blocks ${ip}`, mine, true);
+    }
+    if (mine === php.res.blocked) {
+      return d.same(`filter_var(NO_PRIV|NO_RES) public ${ip}`, mine, false);
+    }
+    return d.ok(`${ip} is only blocked by the port because it is reserved space`,
+      inExtras(ip), `js=${mine} php=${php.res.blocked} extras=${inExtras(ip)}`);
+  }));
+}
+
 // ------------------------------------------------------------------ store and cache paths
 {
   const cacert = path.join(import.meta.dirname, '..', 'tools', 'cacert.pem');
@@ -1009,6 +1065,7 @@ const SECTION_NAMES = {
   self: 'CertChain::isSelfSigned',
   b64: 'php base64_decode',
   fu: 'filter_var(FILTER_VALIDATE_URL)',
+  pr: 'UrlGuard::isPrivateHost',
   ss: 'CertChain::systemStore', sw: 'CertChain::systemStore order', acc: 'store acceptance test',
   cp: 'CertChain::cachePath',
 };

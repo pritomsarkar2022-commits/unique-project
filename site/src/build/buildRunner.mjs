@@ -6,6 +6,7 @@ import { Mp4Mux } from '../hls/mp4Mux.mjs';
 import { TsDemuxer } from '../hls/tsDemuxer.mjs';
 import { TsStream } from './tsStream.mjs';
 import { Source } from '../extractor/source.mjs';
+import { HttpClient } from '../net/httpClient.mjs';
 import { stampTimes, captureParams } from './mp4Builder.mjs';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -90,7 +91,11 @@ export class Mp4Builder {
    * @param {import('./buildStore.mjs').BuildStore} store
    * @param {object} http
    */
-  static async tick(rec, store, http) {
+  /**
+   * php made its own client inside tick(), so a poll that arrives without one is not
+   * a smaller budget: it gets the same request limit handle_build() passes.
+   */
+  static async tick(rec, store, http = new HttpClient(Math.trunc(Number(cfg('build.request_limit', 900))))) {
     if (rec.status === 'done' || rec.status === 'error') {
       return rec;
     }
@@ -109,8 +114,12 @@ export class Mp4Builder {
         throw new ExtractException('This save lost the work it had done.', 'Run the same link again.', 'lost');
       }
       mux = resume ? Mp4Mux.adopt(prior.mp4, prior.log) : Mp4Mux.open();
-      const deadline = Date.now() + Math.trunc(Number(cfg('build.tick_seconds', 25))) * 1000;
-      const slice = Math.trunc(Number(cfg('build.tick_segments', 12)));
+      const deadline = Date.now() + Math.trunc(Number(cfg('build.tick_seconds', 10))) * 1000;
+      // The php tick read build.tick_segments (three parts), because on shared hosting a
+      // part only cost one curl. Here a tick also carries the whole partial file in and
+      // out of blob storage, so one longer slice is fewer function calls for the same
+      // save; the ten-second deadline still decides when the request stops.
+      const slice = Math.trunc(Number(cfg('build.tick_segments_netlify', cfg('build.tick_segments', 3))));
       const segments = rec.segments;
       // One demuxer for the whole slice: a packet that a part cuts in half continues
       // in the next one, and dropping it would slide audio off the picture for the

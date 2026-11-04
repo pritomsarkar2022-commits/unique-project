@@ -6,7 +6,7 @@
 # proxied to one function so the browser keeps asking the same urls it always did.
 
 [build]
-  command = "node scripts/generate-static.mjs"
+  command = "node scripts/generate-views.mjs && node scripts/generate-static.mjs"
   publish = "site/public"
   functions = "netlify/functions"
 
@@ -15,7 +15,9 @@
 
 [functions]
   node_bundler = "esbuild"
-  # Provided by the runtime, and useless to bundle.
+  # Kept out of the bundle on purpose: the blobs client pulls the opentelemetry
+  # sdk with it, and the package is in dependencies, so it is in the deploy's
+  # node_modules already.
   external_node_modules = ["@netlify/blobs"]
 
 # app.js posts to "index.php?r=analyze" exactly as it always did, so that url keeps
@@ -45,8 +47,9 @@
   to = "/.netlify/functions/router"
   status = 200
 
-# The apache front controller took every path that was not a real file, so the home
-# page answers them here too. Non-force keeps real static files in front of it.
+# The apache front controller rewrote every path that was not a real file to index.php
+# without a route, so the home page answered /anything at all. Non-force keeps real
+# static files in front of it, which is what !-f did there.
 [[redirects]]
   from = "/*"
   to = "/index.html"

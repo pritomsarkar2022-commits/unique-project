@@ -33,7 +33,7 @@ const IPV4_PRIVATE = [
   [0x7f000000, 0xff000000], // 127.0.0.0/8    loopback
   [0xa9fe0000, 0xffff0000], // 169.254.0.0/16 link local
   [0xac100000, 0xfff00000], // 172.16.0.0/12  private
-  [0xc0000000, 0xff000000], // 192.0.0.0/8    IETF assignments
+  [0xc0000000, 0xffffff00], // 192.0.0.0/24   IETF protocol assignments
   [0xc0000200, 0xffffff00], // 192.0.2.0/24   documentation
   [0xc0586300, 0xffffff00], // 192.88.99.0/24 6to4 relay
   [0xc0a80000, 0xffff0000], // 192.168.0.0/16 private

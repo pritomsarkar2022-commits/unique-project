@@ -49,6 +49,13 @@ export const config = {
     max_concurrent_requests: 3,
     relay_buffer_bytes: 262144,
     relay_max_bytes: 0,
+
+    // Added for the netlify port. A function response may carry 20 MB when it streams
+    // and 6 MB when it buffers, so one proxied answer stops here and the rest of the
+    // file comes in the next ranged request. The php ceiling above is a shared-hosting
+    // memory limit and stays at 0 = unlimited, because nothing about the php app read
+    // it; this one is enforced by Relay.
+    function_stream_bytes: 18874368,
   },
 
   hls: {

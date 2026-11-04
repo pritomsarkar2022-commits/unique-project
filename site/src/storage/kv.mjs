@@ -17,11 +17,14 @@ import { fileURLToPath } from 'node:url';
  * Divergences from the flat files, all forced by the platform and each noted
  * where it is used:
  *   - There is no flock()/LOCK_EX. Writes are atomic per key (rename on fs,
- *     put-on-blobs) and BuildStore's lock is an advisory create-if-absent put
- *     with a ttl, see kv.putIfNotExists().
- *   - Blobs' createdAt names the first write and does not move when a key is
- *     overwritten, while php's filemtime was "last touched". Anything that ages
- *     entries therefore reads meta.touched first and falls back to createdAt.
+ *     put-on-blobs) and BuildStore's lock is a create-if-absent put with a ttl,
+ *     see kv.putIfNotExists(): blobs answers a lost race with {modified:false},
+ *     which a held flock does far better than an expired lock does, because a
+ *     function invocation that times out leaves no process behind to release it.
+ *   - filemtime was "last touched". Blobs exposes no clock at all, so the blobs
+ *     driver writes the time of its own put into the entry's metadata and hands
+ *     that back as createdAt; on both drivers createdAt means the last write.
+ *     Anything that ages entries reads meta.touched first anyway.
  */
 
 const SITE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -69,6 +72,9 @@ export function selectDriver(env = process.env) {
  * driver also has one (an exclusive O_CREAT|O_EXCL create), so callers should
  * prefer kv.putIfNotExists(); this hook is here for the case where code wants to
  * know whether the platform, rather than a lock file, is holding the lock.
+ * Blobs has it from sdk 10 up, where set() takes onlyIfNew; an older sdk ignores
+ * the option and silently overwrites, which is why putIfNotExists probes for the
+ * answer shape instead of trusting the option.
  */
 export function atomicPutGuardAvailable(env = process.env) {
   return selectDriver(env) === 'blobs';
@@ -299,9 +305,10 @@ function safeNamespace(namespace) {
  * The blobs driver. '@netlify/blobs' is imported dynamically and only here, so a
  * repository checkout without the package (every local run and every test) still
  * loads this module; openKv() turns the failed import into a filesystem fallback.
+ * loadSdk exists for the tests, which hand in a fake getStore.
  */
-async function makeBlobsKv(namespace, env) {
-  const mod = await import('@netlify/blobs');
+async function makeBlobsKv(namespace, env, loadSdk = () => import('@netlify/blobs')) {
+  const mod = await loadSdk();
   const getStore = mod.getStore ?? (mod.default && mod.default.getStore);
   if (typeof getStore !== 'function') {
     throw new Error('@netlify/blobs exposes no getStore');
@@ -335,6 +342,46 @@ async function makeBlobsKv(namespace, env) {
     return Buffer.from(raw instanceof ArrayBuffer ? new Uint8Array(raw) : raw);
   };
 
+  /**
+   * The write clock. getMetadata() returns {etag, metadata} and list() returns
+   * {key, etag} per entry: neither carries a timestamp, so without this every
+   * blobs entry would age from 1970 and the gc sweeps would delete fresh jobs,
+   * fresh build records and finished mp4s on their first tick.
+   */
+  const STAMP = '_kv_written_at';
+  const customOf = (m) => {
+    const outer = metaOf(m);
+    if (!outer) {
+      return null;
+    }
+    return outer.custom !== undefined ? metaOf(outer.custom) : outer;
+  };
+  const stampIn = (meta) => {
+    const out = {};
+    for (const [k, v] of Object.entries(metaOf(meta) ?? {})) {
+      if (k !== STAMP) {
+        out[k] = v;
+      }
+    }
+    out[STAMP] = Math.floor(Date.now() / 1000);
+    return out;
+  };
+  /** Splits the stored metadata back into what the caller wrote and when. */
+  const unstamp = (stored) => {
+    const m = customOf(stored);
+    const at = Number(m && m[STAMP]);
+    const meta = {};
+    for (const [k, v] of Object.entries(m ?? {})) {
+      if (k !== STAMP) {
+        meta[k] = v;
+      }
+    }
+    return {
+      meta: Object.keys(meta).length > 0 ? meta : null,
+      createdAt: Number.isFinite(at) ? Math.trunc(at) : 0,
+    };
+  };
+
   const kv = {
     driver: 'blobs',
     namespace,
@@ -352,75 +399,70 @@ async function makeBlobsKv(namespace, env) {
       if (data === null) {
         return null;
       }
-      const meta = metaOf(res && res.metadata ? res.metadata : null);
-      return {
-        data,
-        meta: meta && (meta.custom !== undefined ? metaOf(meta.custom) : meta),
-        createdAt: seconds(meta && (meta.createdAt ?? meta.created)),
-      };
+      const { meta, createdAt } = unstamp(res && res.metadata ? res.metadata : null);
+      return { data, meta, createdAt };
     },
 
+    /**
+     * The blobs api has no ranged read at any sdk version: get() sends no Range
+     * header and there is no getRange, so the slice is cut from the whole object
+     * here. The 20 MB output ceiling is what keeps one of these readable.
+     * The answers match the filesystem driver one for one: null for an absent
+     * key, an empty slice with the true total for an unsatisfiable range.
+     */
     async getRange(key, start, endInclusive) {
       assertKey(key);
-      const from = Math.max(0, Math.trunc(Number(start) || 0));
-      const opts = { type: 'arrayBuffer' };
-      if (Number.isFinite(from)) {
-        opts.start = from;
-      }
-      if (endInclusive !== null && endInclusive !== undefined && Number.isFinite(Number(endInclusive))) {
-        opts.end = Math.trunc(Number(endInclusive));
-      }
-      let data = null;
-      try {
-        data = await read(await store.getRange(key, opts));
-      } catch {
-        data = null;
-      }
-      let total = null;
-      if (typeof store.getMetadata === 'function') {
-        try {
-          const md = await store.getMetadata(key, { type: 'arrayBuffer' });
-          if (md && Number.isFinite(Number(md.size))) {
-            total = Number(md.size);
-          }
-        } catch {
-          total = null;
-        }
-      }
-      if (total === null) {
-        // No usable size for the object: read the whole key so the total the
-        // caller puts in Content-Range is still the truth, not a guess.
-        const whole = await kv.get(key);
-        if (whole === null) {
-          return null;
-        }
-        return { data: whole.subarray(from, opts.end === undefined ? undefined : opts.end + 1), total: whole.length };
-      }
-      if (data === null) {
+      const whole = await kv.get(key);
+      if (whole === null) {
         return null;
       }
-      return { data, total };
+      const total = whole.length;
+      const from = Math.max(0, Math.trunc(Number(start) || 0));
+      let to = endInclusive === null || endInclusive === undefined || !Number.isFinite(Number(endInclusive))
+        ? total - 1
+        : Math.trunc(Number(endInclusive));
+      if (to > total - 1) {
+        to = total - 1;
+      }
+      if (from > to || from >= total) {
+        return { data: Buffer.alloc(0), total };
+      }
+      return { data: whole.subarray(from, to + 1), total };
     },
 
     async put(key, value, meta = null) {
       assertKey(key);
-      await store.set(key, toBuffer(value), meta === null || meta === undefined ? undefined : { metadata: meta });
+      await store.set(key, toBuffer(value), { metadata: stampIn(meta) });
     },
 
-    /** Blobs' allowIfNotExists is the atomic guard. A rejected put means either a
-     *  conflict or a store fault; both answer "someone else holds it", and the ttl
-     *  on the lock keeps a store fault from wedging a build forever. */
+    /**
+     * Create-if-absent, which is what the build lock wants. onlyIfNew is the
+     * atomic version and the sdk answers a lost race with {modified: false}.
+     * The read in front of it is not decoration: an sdk older than 10 takes only
+     * {metadata} out of these options, so onlyIfNew is ignored and the put lands
+     * anyway — the read keeps that build from taking a lock someone else holds,
+     * and leaves one round trip of race between two first writers, which is what
+     * the ttl and the README cover.
+     */
     async putIfNotExists(key, value, meta = null) {
       assertKey(key);
-      try {
-        await store.set(key, toBuffer(value), {
-          allowIfNotExists: true,
-          ...(meta === null || meta === undefined ? {} : { metadata: meta }),
-        });
-        return true;
-      } catch {
+      const buf = toBuffer(value);
+      const options = { metadata: stampIn(meta) };
+      if (await store.get(key, { type: 'arrayBuffer' }) !== null) {
         return false;
       }
+      let res;
+      try {
+        res = await store.set(key, buf, { ...options, onlyIfNew: true });
+      } catch {
+        return false; // a store fault answers "someone else holds it"; the ttl clears it
+      }
+      if (res && typeof res.modified === 'boolean') {
+        return res.modified;
+      }
+      // No conditional support: the set above wrote the value, and the read said
+      // the key was free, so this side of the race is the one that won.
+      return true;
     },
 
     async del(key) {
@@ -428,27 +470,32 @@ async function makeBlobsKv(namespace, env) {
       await store.delete(key);
     },
 
+    /**
+     * {key, meta, createdAt} for every key, sorted, the whole store in one page.
+     * The metadata comes from a HEAD per key, never from a get: the sweep that
+     * ages entries out runs over the files namespace, where the bodies are video.
+     */
     async list(prefix = '') {
-      const res = await store.list({ prefix });
-      const entries = res ? (res.keys ?? res.blobs ?? []) : [];
-      const out = [];
-      for (const entry of entries) {
-        const key = typeof entry === 'string' ? entry : entry.key;
-        if (typeof key !== 'string') {
-          continue;
-        }
-        let meta = metaOf(entry && (entry.custom ?? entry.metadata));
-        let createdAt = entry ? seconds(entry.lastModified ?? entry.createdAt) : 0;
-        if (meta === null && typeof store.getWithMetadata === 'function') {
+      const res = await store.list(prefix === '' ? {} : { prefix });
+      const entries = (res ? (res.blobs ?? res.keys ?? []) : [])
+        .map((entry) => (typeof entry === 'string' ? { key: entry } : entry))
+        .filter((entry) => entry && typeof entry.key === 'string');
+      const out = await Promise.all(entries.map(async (entry) => {
+        let stamp = unstamp(entry.metadata !== undefined ? entry.metadata : null);
+        if (stamp.meta === null && stamp.createdAt === 0 && typeof store.getMetadata === 'function') {
           try {
-            const withMeta = await store.getWithMetadata(key, { type: 'arrayBuffer' });
-            meta = metaOf(withMeta && withMeta.metadata ? withMeta.metadata.custom ?? withMeta.metadata : null);
+            const md = await store.getMetadata(entry.key);
+            stamp = unstamp(md && md.metadata ? md.metadata : null);
           } catch {
-            meta = null;
+            stamp = { meta: null, createdAt: 0 };
           }
         }
-        out.push({ key, meta, createdAt });
-      }
+        return {
+          key: entry.key,
+          meta: stamp.meta,
+          createdAt: stamp.createdAt || seconds(entry.lastModified ?? entry.last_modified),
+        };
+      }));
       out.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
       return out;
     },
@@ -461,4 +508,4 @@ async function makeBlobsKv(namespace, env) {
   return kv;
 }
 
-export const __testing = { assertKey, toBuffer, safeNamespace };
+export const __testing = { assertKey, toBuffer, safeNamespace, makeBlobsKv };

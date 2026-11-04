@@ -258,9 +258,29 @@ export class BuildStore {
     return { mp4, log: log ?? Buffer.alloc(0) };
   }
 
-  /** Both halves of the partial file travel together, or a resume rebuilds half a movie. */
-  async writeOutput(id, mp4, log) {
+  /**
+   * One byte span of the finished file, for the route that hands it to a player.
+   *
+   * php opened the mp4 on disk with fopen() and fseek(); a blob has no seek, but the
+   * storage API has a ranged read, so this is the same thing without the whole file
+   * ever being held. null is a key that is not there, and `total` is the size the
+   * route puts in Content-Range.
+   *
+   * @returns {Promise<{data: Buffer, total: number}|null>}
+   */
+  async readRange(id, start, endInclusive) {
     if (!validBuildId(id)) {
+      return null;
+    }
+    const files = await this.filesStore();
+    if (typeof files.getRange !== 'function') {
+      return null;
+    }
+    return files.getRange(this.paths(id).mp4, start, endInclusive);
+  }
+
+  /** Both halves of the partial file travel together, or a resume rebuilds half a movie. */
+  async writeOutput(id, mp4, log) {    if (!validBuildId(id)) {
       return;
     }
     const p = this.paths(id);

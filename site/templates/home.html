@@ -29,8 +29,8 @@
 <meta name="twitter:card" content="summary">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&family=Roboto+Mono:wght@400&display=swap" media="print" onload="this.media='all'">
-<link rel="stylesheet" href="/assets/css/material.css?v1793693874">
-<link rel="stylesheet" href="/assets/css/app.css?v1793693874">
+<link rel="stylesheet" href="{{BASE}}assets/css/material.css?v1735689600">
+<link rel="stylesheet" href="{{BASE}}assets/css/app.css?v1735689600">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='18' fill='%236750a4'/><path d='M38 30l34 20-34 20z' fill='white'/></svg>">
 </head>
 <body>
@@ -107,17 +107,7 @@
         </form>
 
         <div class="host-chips" aria-label="Known sites">
-                      <span class="chip"><svg class="ic"><use href="#ic-video_file"/></svg>cloudfam.io</span>
-                      <span class="chip"><svg class="ic"><use href="#ic-video_file"/></svg>firestream.net</span>
-                      <span class="chip"><svg class="ic"><use href="#ic-video_file"/></svg>luluvido.com</span>
-                      <span class="chip"><svg class="ic"><use href="#ic-video_file"/></svg>mxdrop.to</span>
-                      <span class="chip"><svg class="ic"><use href="#ic-video_file"/></svg>playmate.net</span>
-                      <span class="chip"><svg class="ic"><use href="#ic-video_file"/></svg>streamfile.net</span>
-                      <span class="chip"><svg class="ic"><use href="#ic-video_file"/></svg>streamtape.com</span>
-                      <span class="chip"><svg class="ic"><use href="#ic-video_file"/></svg>vidara.to</span>
-                      <span class="chip"><svg class="ic"><use href="#ic-video_file"/></svg>vixeo.io</span>
-                      <span class="chip"><svg class="ic"><use href="#ic-video_file"/></svg>dupload.net</span>
-                    <span class="chip chip-fill">and any page that serves a video file</span>
+{{HOST_CHIPS}}                    <span class="chip chip-fill">and any page that serves a video file</span>
         </div>
 
         <div class="results" id="results" aria-live="polite"></div>
@@ -188,67 +178,7 @@
             <table class="hosts-table">
         <thead><tr><th>Site</th><th>What comes back</th></tr></thead>
         <tbody>
-                  <tr>
-            <td>
-              <b>cloudfam.io</b>
-              <span class="alias">and 1 more domains</span>            </td>
-            <td><span class="badge badge-ok">MP4</span></td>
-          </tr>
-                  <tr>
-            <td>
-              <b>firestream.net</b>
-              <span class="alias">and 3 more domains</span>            </td>
-            <td><span class="badge">MP4 or HLS</span></td>
-          </tr>
-                  <tr>
-            <td>
-              <b>luluvido.com</b>
-              <span class="alias">and 4 more domains</span>            </td>
-            <td><span class="badge">MP4 or HLS</span></td>
-          </tr>
-                  <tr>
-            <td>
-              <b>mxdrop.to</b>
-              <span class="alias">and 7 more domains</span>            </td>
-            <td><span class="badge badge-ok">MP4</span></td>
-          </tr>
-                  <tr>
-            <td>
-              <b>playmate.net</b>
-              <span class="alias">and 2 more domains</span>            </td>
-            <td><span class="badge">MP4 or HLS</span></td>
-          </tr>
-                  <tr>
-            <td>
-              <b>streamfile.net</b>
-              <span class="alias">and 3 more domains</span>            </td>
-            <td><span class="badge">MP4 or HLS</span></td>
-          </tr>
-                  <tr>
-            <td>
-              <b>streamtape.com</b>
-              <span class="alias">and 8 more domains</span>            </td>
-            <td><span class="badge badge-ok">MP4</span></td>
-          </tr>
-                  <tr>
-            <td>
-              <b>vidara.to</b>
-              <span class="alias">and 2 more domains</span>            </td>
-            <td><span class="badge">MP4 or HLS</span></td>
-          </tr>
-                  <tr>
-            <td>
-              <b>vixeo.io</b>
-              <span class="alias">and 2 more domains</span>            </td>
-            <td><span class="badge">MP4 or HLS</span></td>
-          </tr>
-                  <tr>
-            <td>
-              <b>dupload.net</b>
-              <span class="alias">and 2 more domains</span>            </td>
-            <td><span class="badge badge-ok">MP4</span></td>
-          </tr>
-                <tr><td><b>any other site</b></td><td><span class="badge">best effort</span></td></tr>
+{{HOST_ROWS}}                <tr><td><b>any other site</b></td><td><span class="badge">best effort</span></td></tr>
         </tbody>
       </table>
     </div>
@@ -371,13 +301,13 @@
       </div>
     </div>
     <div class="foot-note">
-      <span>&copy; 2026 Grably</span>
+      <span>&copy; {{YEAR}} Grably</span>
       <span>We do not host any video files. Content belongs to the site you pasted.</span>
     </div>
               <p class="legal">Grably only fetches files a page already makes publicly available. Downloading a video you do not own or are not licensed to copy breaks the hosting site and copyright law.</p>
       </div>
 </footer>
 <div class="snackbar-host" id="snackbar-host"></div>
-<script src="/assets/js/app.js?v1793693874" defer></script>
+<script src="{{BASE}}assets/js/app.js?v1735689600" defer></script>
 </body>
 </html>

@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { cfg } from './config.mjs';
 
 /**
@@ -322,15 +323,54 @@ export function base64UrlDecode(text) {
 
 export const VD_VERSION = '1.0.0';
 
+/**
+ * The address the visitor came in on, for the routes that build links without naming
+ * a host themselves.
+ *
+ * php read $_SERVER['HTTP_HOST'], $_SERVER['HTTPS'] and $_SERVER['SCRIPT_NAME'] out of
+ * a superglobal inside site_url(), base_href() and Relay::appUrl(). A function has no
+ * superglobal, so the entry layer sets this once per request; passing a host to either
+ * helper still wins over it, the way an explicit argument always did.
+ *
+ * It lives in an async context and not in a module variable because one node process
+ * serves several visitors at the same time, where apache gave each request its own. A
+ * shared variable here would let one request build a link that names another visitor's
+ * host, which is exactly the leak the sealed relay url exists to prevent.
+ */
+const hostScope = new AsyncLocalStorage();
+const outsideRequest = { host: '', https: true, dir: '' };
+
+export function setRequestHost(host = '', https = true, scriptName = '/index.php') {
+  hostScope.enterWith({ host: String(host || ''), https: https !== false, dir: hrefDir(scriptName) });
+}
+
+export function getRequestHost() {
+  return hostScope.getStore() ?? outsideRequest;
+}
+
+/** base_href(): the directory the front controller lives in, with a trailing slash. */
+export function baseHref() {
+  return getRequestHost().dir + '/';
+}
+
+function hrefDir(scriptName) {
+  const script = String(scriptName ?? '/index.php').replace(/\\/g, '/');
+  const cut = script.lastIndexOf('/');
+  return (cut < 0 ? '' : script.slice(0, cut)).replace(/\/+$/, '');
+}
+
 /** site_url(): config base_url always wins, the requested host is only a fallback. */
 export function siteUrl(path = '', hostHeader = '', https = true) {
   let root = String(cfg('app.base_url', '') || '').replace(/\/+$/, '');
   if (root === '') {
-    let host = String(hostHeader || '');
+    const ambientHost = getRequestHost();
+    const ambient = hostHeader === '' || hostHeader === null || hostHeader === undefined;
+    let host = String(ambient ? ambientHost.host : hostHeader);
     if (!/^[A-Za-z0-9.\-]{1,100}(:\d{2,5})?$/.test(host)) {
       host = 'localhost';
     }
-    root = (https ? 'https' : 'http') + '://' + host;
+    const secure = ambient ? ambientHost.https : https !== false;
+    root = (secure ? 'https' : 'http') + '://' + host + (ambient ? ambientHost.dir : '');
   }
   return root + (path === '' ? '' : '/' + String(path).replace(/^\/+/, ''));
 }
