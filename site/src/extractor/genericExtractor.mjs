@@ -93,8 +93,10 @@ export class GenericExtractor extends BaseExtractor {
     }
     if (res.status === 403) {
       throw new ExtractException(
-        'That site only answers its own visitors.',
-        'A browser check sits between this server and the page, and this tool does not go around one. Open the link in your own browser, then paste the address of the page that shows the player.',
+        'That site checks the browser that opens it.',
+        'Your own browser passes that check, this server cannot and will not go around it. Open the '
+        + 'video in your browser, copy the .m3u8 or file address its player uses, and paste that into '
+        + 'Stream address. That save runs on your device.',
         'gated',
       );
     }

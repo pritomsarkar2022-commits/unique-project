@@ -914,3 +914,45 @@ test('a deploy with no store says so instead of failing every write', async () =
     assert.ok(warned.length > 0, 'the fallback attempt is still logged');
   }
 });
+
+test('analyze answers for a slow host before the platform kills the function', async () => {
+  const never = () => new Promise(() => { });
+  const slow = await handle(post('/index.php?r=analyze', { url: 'https://cloudfam.io/v/x' }), {
+    analyze: never,
+    analyzeBudgetMs: 40,
+  });
+  assert.equal(slow.status, 504);
+  const body = JSON.parse(slow.body);
+  assert.equal(body.ok, false);
+  assert.equal(body.code, 'slow');
+  assert.match(body.hint, /Stream address/, 'the answer tells the visitor the one route that still works');
+  assert.doesNotMatch(slow.body, /errorType|errorMessage|Invoke|timeout/i,
+    'never the platform words: a visitor cannot act on a function being killed');
+
+  // A host that answers after the answer went out must not become an unhandled rejection,
+  // which on netlify is how a healthy function instance dies.
+  const seen = [];
+  const note = (p) => seen.push(p);
+  process.on('unhandledRejection', note);
+  const boom = () => new Promise((_, reject) => setTimeout(() => reject(new Error('late host')), 700));
+  const late = await handle(post('/index.php?r=analyze', { url: 'https://cloudfam.io/v/y' }), {
+    analyze: boom,
+    analyzeBudgetMs: 200,
+  });
+  await new Promise((r) => setTimeout(r, 900));
+  process.off('unhandledRejection', note);
+  assert.equal(late.status, 504, 'the budget answered first');
+  assert.deepEqual(seen, [], 'and the late rejection was swallowed by the race');
+
+  const quick = await handle(post('/index.php?r=analyze', { url: 'https://cloudfam.io/v/z' }), {
+    analyze: async () => ({ job: 'a'.repeat(20) }),
+    analyzeBudgetMs: 4000,
+  });
+  assert.equal(quick.status, 200, 'a host inside the budget is untouched by it');
+
+  const refused = await handle(post('/index.php?r=analyze', { url: 'https://cloudfam.io/v/w' }), {
+    analyze: async () => { throw new (await import('../src/errors.mjs')).ExtractException('That page is not there.', 'Check the link.', 'not_found'); },
+    analyzeBudgetMs: 4000,
+  });
+  assert.equal(refused.status, 422, 'an extractor refusal still answers as itself, not as a timeout');
+});

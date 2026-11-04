@@ -38,6 +38,14 @@ function vdLog(message, context = {}) {
 }
 
 /**
+ * How long an analyze may take before this router answers for it: the clamp lives with
+ * the route. Netlify cuts a synchronous function off at 30s, and the visitor then reads
+ * the platform's own 502 page instead of anything this app wrote, so the deadline stays a
+ * few seconds short of it and the answer stays a sentence in the visitor's language.
+ * `extract.analyze_budget_ms` moves it; nothing raises it past the platform.
+ */
+
+/**
  * @param {{method:string, server:object, query:object, post:object, headers:object,
  *   body:Buffer, host:string, https:boolean, path:string}} ctx from buildContext()
  * @returns {Promise<VdResponse>}
@@ -205,8 +213,62 @@ async function handleAnalyze(ctx, deps) {
     return jsonOut({ ok: false, error: 'Paste a video page link.', code: 'empty' }, 422);
   }
 
-  const result = await Analyzer.analyze(raw, deps.analyzer ?? {});
-  return jsonOut({ ok: true, ...result });
+  const budget = Math.max(200, Math.min(26000, Number(deps.analyzeBudgetMs ?? cfg('extract.analyze_budget_ms', 26000)) || 26000));
+  const run = deps.analyze ?? ((raw, d) => Analyzer.analyze(raw, d));
+  const within = await withinBudget(run(raw, deps.analyzer ?? {}), budget);
+  if (within === null) {
+    // Answering first is the whole point: the platform's own 502 page is what a dead
+    // link looks like otherwise, and a visitor cannot act on it.
+    vdLog('analyze out of budget', { host: hostOf(raw) });
+    return jsonOut({
+      ok: false,
+      error: 'That host is still thinking.',
+      hint: 'It took longer than this site is allowed to wait. Run the link again, or paste the '
+        + '.m3u8 or file address of the video into Stream address - that save runs on your device '
+        + 'and never asks this host for permission.',
+      code: 'slow',
+    }, 504);
+  }
+  return jsonOut({ ok: true, ...within });
+}
+
+/**
+ * A promise's value, or null once ms has passed.
+ *
+ * The timer is cleared either way: a function instance left holding an open timer is one
+ * the platform will not freeze. Nothing rejects on the losing branch, so a host that
+ * answers late cannot surface as an unhandled rejection after the answer is already sent.
+ */
+async function withinBudget(promise, ms) {
+  const settled = Promise.resolve(promise).then(
+    (value) => ({ done: true, value }),
+    (error) => ({ done: true, error })
+  );
+  let timer = null;
+  const gate = new Promise((resolve) => { timer = setTimeout(() => resolve({ done: false }), ms); });
+  let first = null;
+  try {
+    first = await Promise.race([settled, gate]);
+  } finally {
+    if (timer !== null) {
+      clearTimeout(timer);
+    }
+  }
+  if (first.done !== true) {
+    return null;
+  }
+  if (first.error !== undefined) {
+    throw first.error;
+  }
+  return first.value;
+}
+
+function hostOf(raw) {
+  try {
+    return new URL(raw).host;
+  } catch {
+    return 'unknown';
+  }
 }
 
 /**
