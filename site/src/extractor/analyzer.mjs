@@ -32,6 +32,14 @@ import { Source } from './source.mjs';
  * to code points is the `/u` pattern in fileName(), handled by pregReplaceU() below
  * the same way mediaSniffer.mjs handles its own `/u` patterns.
  */
+
+/**
+ * Codes that say the host, not the page, is the problem. Reading the same address again
+ * with the generic parser repeats the request that already failed, and on a slow host it
+ * doubles the wait until the platform - not this app - ends the request.
+ */
+const NOT_RETRIABLE = new Set(['gated', 'api_down', 'host_down', 'resolve_failed', 'timeout', 'http_503']);
+
 export class Analyzer {
   /**
    * @param {string} raw what the visitor pasted
@@ -204,7 +212,7 @@ export class Analyzer {
         throw e;
       }
       const { GenericExtractor } = await import('./genericExtractor.mjs');
-      if (extractor instanceof GenericExtractor || e.codeName === 'gated') {
+      if (extractor instanceof GenericExtractor || NOT_RETRIABLE.has(e.codeName)) {
         throw e;
       }
       vdLog('host extractor failed, retrying generic', { host: extractor.name(), error: e.message });

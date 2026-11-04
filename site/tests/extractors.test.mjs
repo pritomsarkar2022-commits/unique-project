@@ -7,7 +7,8 @@ import { ExtractorRegistry, HOST_EXTRACTORS } from '../src/extractor/extractorRe
 import { MediaBundle } from '../src/extractor/mediaBundle.mjs';
 import { Source } from '../src/extractor/source.mjs';
 import { HttpResponse } from '../src/net/httpResponse.mjs';
-import { HttpException, UrlGuardException } from '../src/errors.mjs';
+import { ExtractException, HttpException, UrlGuardException } from '../src/errors.mjs';
+import { Analyzer } from '../src/extractor/analyzer.mjs';
 
 /**
  * The stub HttpClient: a scripted reply table plus a call log, so every assertion
@@ -820,9 +821,12 @@ test('GenericExtractor.extract(): a pasted file address costs one peek plus one 
 });
 
 test('GenericExtractor.extract(): the refusals keep their wording', async () => {
+  const gate = 'Your own browser passes that check, this server cannot and will not go around it. Open the '
+    + 'video in your browser, copy the .m3u8 or file address its player uses, and paste that into '
+    + 'Stream address. That save runs on your device.';
   const refusals = [
     [401, 'That page needs a sign in.', 'This tool does not use accounts, so it stops there. Paste a page that is open to visitors.', 'gated'],
-    [403, 'That site only answers its own visitors.', 'A browser check sits between this server and the page, and this tool does not go around one. Open the link in your own browser, then paste the address of the page that shows the player.', 'gated'],
+    [403, 'That site checks the browser that opens it.', gate, 'gated'],
     [404, 'That page is not there.', 'Check the link, or paste the address of the page that shows the player.', 'not_found'],
     [410, 'That page is not there.', 'Check the link, or paste the address of the page that shows the player.', 'not_found'],
   ];
@@ -929,5 +933,65 @@ test('GenericExtractor.extract(): the finder seam is where DeepFinder lands', as
     assert.equal(http4.calls.filter((c) => c.url !== page).length, 6, 'verify_limit 6 candidates are probed, not 10');
   } finally {
     GenericExtractor.setDeepFinderFactory(null);
+  }
+});
+
+/* ---------------- Analyzer.runExtractor(): who gets a second attempt ---------------- */
+
+/** A host extractor with a name, so every branch of the fallback is reachable on one object. */
+function hostExtractor(codeName) {
+  return {
+    name: () => 'cloudfam',
+    setEmbedReferrer() { },
+    async extract() {
+      throw new ExtractException('the host extractor spoke', 'its own hint', codeName);
+    },
+  };
+}
+
+test('a host that did not answer is not asked twice by a second reader', async () => {
+  for (const code of ['gated', 'api_down', 'host_down', 'resolve_failed', 'timeout', 'http_503']) {
+    const http = new FakeHttp({});
+    await assert.rejects(() => Analyzer.runExtractor(hostExtractor(code), 'https://cloudfam.io/v/x', http, null), (err) => {
+      assert.equal(err.codeName, code, code + ' is fatal: a generic read of the same address costs the visitor another '
+        + 'round of requests to the host that already refused');
+      assert.equal(err.message, 'the host extractor spoke', 'and the visitor keeps the words the host extractor chose');
+      return true;
+    });
+    assert.equal(http.calls.length, 0, code + ' never reaches the second reader');
+  }
+});
+
+test('a page that parsed to nothing still gets the generic read', async () => {
+  const page = 'https://cloudfam.io/v/quiet';
+  const clip = 'https://cdn.example.org/v.mp4';
+  const http = new FakeHttp({
+    [page]: [res(200, '<html><body>player.src("https://cdn.example.org/v.mp4")</body></html>', {}, 'text/html', page)],
+    [clip]: [res(200, '', { 'content-length': '4000000' }, 'video/mp4')],
+  });
+  const bundle = await Analyzer.runExtractor(hostExtractor('no_media'), page, http, null);
+  assert.deepEqual(bundle.sources.map((s) => s.url), [clip], 'the failure was about the page, so the page is read again');
+  assert.equal(bundle.provider, 'cloudfam', 'and the host that owns the link still owns the name on the card');
+});
+
+test('a throwable that is not an extractor refusal stays fatal', async () => {
+  const ex = { name: () => 'cloudfam', setEmbedReferrer() { }, async extract() { throw new Error('a bug'); } };
+  await assert.rejects(() => Analyzer.runExtractor(ex, 'https://cloudfam.io/v/x', new FakeHttp({}), null), /a bug/);
+});
+
+test('luluvido: a refused page says what the visitor can still do, and asks once', async () => {
+  const { LuluvidoExtractor } = await import('../src/extractor/luluvidoExtractor.mjs');
+  for (const status of [401, 403]) {
+    const url = 'https://luluvido.com/ielty32jjdm' + status;
+    const http = new FakeHttp({ [url]: [res(status, '<html>blocked</html>', {}, 'text/html', url)] });
+    await assert.rejects(() => new LuluvidoExtractor().extract(url, http), (err) => {
+      assert.equal(err.codeName, 'gated', status + ' is their browser check, not a removed video');
+      assert.equal(err.message, 'That site checks the browser that opens it.');
+      assert.match(err.hint, /Stream address/, 'the hint is the route that works from the visitor side');
+      assert.doesNotMatch(err.hint, /paste the address of the page that shows the player/,
+        'the address they hold is the one that was just refused');
+      return true;
+    });
+    assert.equal(http.calls.length, 1, 'one request: a second reader of the same address gets the same answer');
   }
 });

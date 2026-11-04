@@ -36,6 +36,19 @@ export class LuluvidoExtractor extends BaseExtractor {
     const b = this.newBundle(pageUrl, 'luluvido');
     const res = await http.get(pageUrl, { headers: this.pageHeaders(pageUrl) });
     this.fillMeta(b, res);
+    if (res.status === 401 || res.status === 403) {
+      // Their check is on the address the request comes from, not on the link, so a
+      // second attempt through the generic reader answers the same way. 'gated' is the
+      // one code the analyzer does not retry, and the hint has to be the route that
+      // still works: the visitor's own browser.
+      throw new ExtractException(
+        'That site checks the browser that opens it.',
+        'Your own browser passes that check, this server cannot and will not go around it. Open the '
+        + 'video in your browser, copy the .m3u8 or file address its player uses, and paste that into '
+        + 'Stream address. That save runs on your device.',
+        'gated',
+      );
+    }
     if (!res.ok()) {
       throw new ExtractException('That Luluvido page returned HTTP ' + res.status + '.', 'The video is likely removed.', 'http_' + res.status);
     }
