@@ -183,6 +183,9 @@
 
   function renderError(data) {
     var gated = data.code === 'gated';
+    // A host that took the platform's whole budget gets the same treatment as a gate:
+    // both hints end in "paste it into Stream address", so the field has to be open.
+    var useStream = gated || data.code === 'slow';
     var page = (urlInput.value || '').trim();
     var hint = gated
       ? 'Open the video in your browser, copy its .m3u8 or file address, and use Stream address below. That save runs on your device.'
@@ -196,12 +199,12 @@
       '</div></div>' +
       '<div class="row-flex">' +
       '<button class="btn btn-tonal btn-sm" type="button" onclick="vdReanalyze()"><svg class="ic"><use href="#ic-refresh"/></svg> Try again</button>' +
-      (gated && /^https?:\/\//i.test(page)
+      (useStream && /^https?:\/\//i.test(page)
         ? '<a class="btn btn-outlined btn-sm" href="' + esc(page) + '" target="_blank" rel="noopener"><svg class="ic"><use href="#ic-open_in_new"/></svg> Open the player</a>'
         : '') +
       '<button class="btn btn-text btn-sm" type="button" onclick="document.getElementById(\'url\').focus()"><svg class="ic"><use href="#ic-edit"/></svg> Change link</button>' +
       '</div></div>';
-    if (gated) {
+    if (useStream) {
       var fold = document.querySelector('.direct');
       if (fold) { fold.open = true; }
     }

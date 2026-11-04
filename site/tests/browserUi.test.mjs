@@ -80,3 +80,11 @@ test('the page starts the worker beside itself, so one version covers both', () 
   assert.match(app, /new Worker\(LOCAL\)/, 'the local save stopped going through the worker');
   assert.ok(worker.length > 1000, 'mux-worker.js is a stub: npm run engine');
 });
+
+test('an answer that says "use Stream address" opens the Stream address fold', () => {
+  const gated = /var useStream = gated \|\| data\.code === 'slow';/;
+  assert.match(app, gated, 'the two codes whose hint ends in Stream address share one flag');
+  assert.match(app, /if \(useStream\) \{[\s\S]{0,120}\.direct[\s\S]{0,60}open = true/,
+    'the fold is opened for both, not just for the gate');
+  assert.match(app, /\(useStream && \/\^https/, 'and so is the link out to the player, which their browser can open');
+});
